@@ -1,0 +1,2 @@
+ignored:
+  - DL3041  # dnf install version pinning — not practical on rolling Fedora
