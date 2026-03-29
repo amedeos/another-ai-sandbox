@@ -16,7 +16,7 @@ RUN curl -fsSL https://cursor.com/install | bash
 USER root
 # cursor-agent is a bash wrapper that expects node and index.js in the same dir
 # Copy the entire versioned directory to /opt and create symlink
-RUN CURSOR_VERSION_DIR=$(ls -d /home/agent/.local/share/cursor-agent/versions/*/ | head -1) \
+RUN CURSOR_VERSION_DIR=$(find /home/agent/.local/share/cursor-agent/versions -mindepth 1 -maxdepth 1 -type d | head -1) \
     && cp -rL "$CURSOR_VERSION_DIR" /opt/cursor-agent \
     && chmod 755 /opt/cursor-agent/cursor-agent /opt/cursor-agent/node \
     && ln -sf /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent
