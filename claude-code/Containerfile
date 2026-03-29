@@ -1,0 +1,21 @@
+# =============================================================================
+# Claude Code - sandboxed container
+# Uses the native installer (recommended, npm is deprecated)
+# Auth: ANTHROPIC_API_KEY env var (no browser needed)
+# =============================================================================
+FROM localhost/agent-base:latest
+
+# Native installer downloads the binary to ~/.local/bin
+# We install as root to /usr/local/bin to make it available to everyone
+USER root
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && chmod 755 /usr/local/bin/claude 2>/dev/null || true
+
+# Fallback: if native installer doesn't work in container,
+# use npm (still works, just deprecated)
+RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+
+USER agent
+WORKDIR /workspace
+
+ENTRYPOINT ["claude"]

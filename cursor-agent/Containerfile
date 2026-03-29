@@ -1,0 +1,23 @@
+# =============================================================================
+# Cursor Agent CLI - sandboxed container
+# Auth: CURSOR_API_KEY env var or cursor-agent login
+# =============================================================================
+FROM localhost/agent-base:latest
+
+USER root
+
+# Cursor installer writes to $HOME, so we install as agent
+# and then move the binary
+USER agent
+RUN curl -fsSL https://cursor.com/install | bash
+
+# Verify binary is reachable
+RUN command -v cursor-agent >/dev/null 2>&1 \
+    || echo "WARN: cursor-agent not in PATH, check ~/.local/bin"
+
+# Add ~/.local/bin to PATH (where it typically installs)
+ENV PATH="/home/agent/.local/bin:${PATH}"
+
+WORKDIR /workspace
+
+ENTRYPOINT ["cursor-agent"]

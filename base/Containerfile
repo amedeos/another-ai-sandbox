@@ -1,0 +1,29 @@
+# =============================================================================
+# Base image for AI agent sandboxing
+# Provides common tooling: Node.js, Python, Git, curl
+# =============================================================================
+FROM registry.fedoraproject.org/fedora:43
+
+LABEL maintainer="amedeo" \
+      description="Base image for sandboxed AI coding agents"
+
+# Common toolchain for all agents
+RUN dnf install -y \
+        nodejs \
+        npm \
+        git \
+        python3 \
+        python3-pip \
+        curl \
+        findutils \
+        diffutils \
+        ripgrep \
+        jq \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Non-root user for agent execution
+RUN useradd -m -s /bin/bash agent
+
+# Standard working directory
+WORKDIR /workspace
