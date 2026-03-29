@@ -4,6 +4,8 @@
 # =============================================================================
 FROM localhost/agent-base:latest
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 USER root
 
 # Install cursor-agent as agent user, then move entire installation to /opt

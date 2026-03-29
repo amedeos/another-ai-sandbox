@@ -5,11 +5,13 @@
 # =============================================================================
 FROM localhost/agent-base:latest
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Native installer downloads the binary to ~/.local/bin
 # We install as root to /usr/local/bin to make it available to everyone
 USER root
 RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && chmod 755 /usr/local/bin/claude 2>/dev/null || true
+    && if [ -f /usr/local/bin/claude ]; then chmod 755 /usr/local/bin/claude; fi
 
 # Fallback: if native installer doesn't work in container,
 # use npm (still works, just deprecated)

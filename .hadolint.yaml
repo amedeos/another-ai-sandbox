@@ -1,2 +1,4 @@
 ignored:
   - DL3041  # dnf install version pinning — not practical on rolling Fedora
+  - DL3007  # FROM :latest — we always want the latest local base image
+  - DL3016  # npm version pinning — agents are installed at latest on purpose
