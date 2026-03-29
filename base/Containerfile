@@ -19,6 +19,23 @@ RUN dnf install -y \
         diffutils \
         ripgrep \
         jq \
+        tar \
+        gzip \
+        unzip \
+        wget \
+        patch \
+        tree \
+        ansible \
+        file \
+        less \
+        which \
+        procps-ng \
+        fd-find \
+        strace \
+        yq \
+        sed \
+        gawk \
+        grep \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
