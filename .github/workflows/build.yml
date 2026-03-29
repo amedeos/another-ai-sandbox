@@ -1,0 +1,60 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman
+
+      - name: Build base image
+        run: |
+          podman build \
+            --tag localhost/agent-base:latest \
+            --file base/Containerfile \
+            base/
+
+      - name: Build claude-code image
+        run: |
+          podman build \
+            --tag localhost/agent-claude:latest \
+            --file claude-code/Containerfile \
+            claude-code/
+
+      - name: Build codex image
+        run: |
+          podman build \
+            --tag localhost/agent-codex:latest \
+            --file codex/Containerfile \
+            codex/
+
+      - name: Build cursor-agent image
+        run: |
+          podman build \
+            --tag localhost/agent-cursor:latest \
+            --file cursor-agent/Containerfile \
+            cursor-agent/
+
+      - name: Smoke test – claude
+        run: podman run --rm localhost/agent-claude:latest --version
+
+      - name: Smoke test – codex
+        run: podman run --rm localhost/agent-codex:latest --version
+
+      - name: Smoke test – cursor-agent
+        run: podman run --rm localhost/agent-cursor:latest --version
+
+      - name: List built images
+        run: podman images | grep -E 'agent-(base|claude|codex|cursor)'

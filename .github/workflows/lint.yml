@@ -1,0 +1,46 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: .
+          additional_files: ai-sandbox
+
+  hadolint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Containerfiles
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: base/Containerfile
+
+      - name: Lint claude-code/Containerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: claude-code/Containerfile
+
+      - name: Lint codex/Containerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: codex/Containerfile
+
+      - name: Lint cursor-agent/Containerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: cursor-agent/Containerfile
