@@ -6,18 +6,20 @@ FROM localhost/agent-base:latest
 
 USER root
 
-# Cursor installer writes to $HOME, so we install as agent
-# and then move the binary
+# Install cursor-agent as agent user, then move entire installation to /opt
+# so it survives the tmpfs mount on /home/agent at runtime
 USER agent
 RUN curl -fsSL https://cursor.com/install | bash
 
-# Verify binary is reachable
-RUN command -v cursor-agent >/dev/null 2>&1 \
-    || echo "WARN: cursor-agent not in PATH, check ~/.local/bin"
+USER root
+# cursor-agent is a bash wrapper that expects node and index.js in the same dir
+# Copy the entire versioned directory to /opt and create symlink
+RUN CURSOR_VERSION_DIR=$(ls -d /home/agent/.local/share/cursor-agent/versions/*/ | head -1) \
+    && cp -rL "$CURSOR_VERSION_DIR" /opt/cursor-agent \
+    && chmod 755 /opt/cursor-agent/cursor-agent /opt/cursor-agent/node \
+    && ln -sf /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent
 
-# Add ~/.local/bin to PATH (where it typically installs)
-ENV PATH="/home/agent/.local/bin:${PATH}"
-
+USER agent
 WORKDIR /workspace
 
-ENTRYPOINT ["cursor-agent"]
+ENTRYPOINT ["/usr/local/bin/cursor-agent"]

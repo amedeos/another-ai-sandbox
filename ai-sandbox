@@ -165,11 +165,11 @@ CMD=(
     # Container is read-only, except:
     #   - /workspace: project directory (bind mount rw)
     #   - /tmp: tmpfs for temporary files
-    #   - /home/agent: tmpfs for agent config/cache
+    #   - /home/agent: tmpfs for agent config/cache (mode=0755 for bind mounts)
     --read-only
     -v "${PROJECT_DIR}:/workspace:Z"
     --tmpfs "/tmp:rw,size=${TMPFS_TMP_SIZE}"
-    --tmpfs "/home/agent:rw,size=${TMPFS_HOME_SIZE}"
+    --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755"
     -w /workspace
 
     # === NETWORK ===
@@ -184,6 +184,18 @@ fi
 
 # === API KEY ===
 CMD+=(-e "${API_KEY_VAR}")
+
+# === CURSOR CONFIG: mount entire .cursor directory rw ===
+if [[ "$AGENT" == "cursor" ]]; then
+    # Mount ~/.cursor as rw so cursor-agent can create projects/ and update config
+    if [[ -d "${HOME}/.cursor" ]]; then
+        CMD+=(-v "${HOME}/.cursor:/home/agent/.cursor:Z")
+    fi
+    # auth.json: ro (contains JWT tokens, no need to write)
+    if [[ -f "${HOME}/.config/cursor/auth.json" ]]; then
+        CMD+=(-v "${HOME}/.config/cursor/auth.json:/home/agent/.config/cursor/auth.json:ro,Z")
+    fi
+fi
 
 # === GIT: pass user.name and user.email for commits ===
 GIT_USER=$(git config --global user.name 2>/dev/null || true)
