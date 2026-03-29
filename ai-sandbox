@@ -173,7 +173,7 @@ CMD=(
     --read-only
     -v "${PROJECT_DIR}:/workspace:Z"
     --tmpfs "/tmp:rw,size=${TMPFS_TMP_SIZE}"
-    --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755"
+    --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755,U=true"
     -w /workspace
 
     # === NETWORK ===
