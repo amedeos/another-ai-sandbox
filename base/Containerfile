@@ -36,6 +36,7 @@ RUN dnf install -y \
         sed \
         gawk \
         grep \
+        ShellCheck \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

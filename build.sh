@@ -30,7 +30,7 @@ build_image() {
     local tag="$3"
 
     log "Building ${name} -> ${tag}"
-    ${BUILDER} build \
+    "${BUILDER}" build \
         --tag "${tag}" \
         --file "${dir}/Containerfile" \
         "${dir}"
@@ -78,7 +78,7 @@ case "${TARGET}" in
         build_codex
         build_cursor
         log "=== All images built ==="
-        ${BUILDER} images | grep -E 'agent-(base|claude|codex|cursor)'
+        "${BUILDER}" images | grep -E 'agent-(base|claude|codex|cursor)'
         ;;
     *)
         err "Unknown target: ${TARGET}"

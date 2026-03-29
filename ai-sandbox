@@ -142,7 +142,7 @@ if [[ -z "${!API_KEY_VAR:-}" ]]; then
 fi
 
 # --- Verify image exists ------------------------------------------------------
-if ! ${BUILDER} image exists "${IMAGE}" 2>/dev/null; then
+if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
     echo -e "${RED}Image ${IMAGE} not found.${NC}"
     echo "Build it with: cd ai-sandbox && ./build.sh ${AGENT}"
     exit 1
@@ -152,7 +152,7 @@ fi
 CONTAINER_NAME="sandbox-${AGENT}-$$"
 
 CMD=(
-    ${BUILDER} run --rm -it
+    "${BUILDER}" run --rm -it
     --name "${CONTAINER_NAME}"
 
     # === ISOLATION ===
@@ -227,7 +227,7 @@ fi
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
-echo -e "  Network:   $(${NETWORK_OFF} && echo 'DISABLED' || echo 'slirp4netns')"
+echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo 'slirp4netns')"
 echo ""
 
 exec "${CMD[@]}"
