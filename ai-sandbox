@@ -127,14 +127,18 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# Verify the API key is set
+# Verify the API key is set (cursor can authenticate via JWT in auth.json)
 if [[ -z "${!API_KEY_VAR:-}" ]]; then
-    echo -e "${YELLOW}Warning: ${API_KEY_VAR} not set.${NC}"
-    echo "Set it with: export ${API_KEY_VAR}=<your-key>"
-    echo "Or create it in ${ENV_FILE}"
-    echo ""
-    read -rp "Do you want to continue anyway? [y/N] " confirm
-    [[ "$confirm" =~ ^[yY]$ ]] || exit 1
+    if [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
+        echo -e "${CYAN}Using JWT auth from ~/.config/cursor/auth.json${NC}"
+    else
+        echo -e "${YELLOW}Warning: ${API_KEY_VAR} not set.${NC}"
+        echo "Set it with: export ${API_KEY_VAR}=<your-key>"
+        echo "Or create it in ${ENV_FILE}"
+        echo ""
+        read -rp "Do you want to continue anyway? [y/N] " confirm
+        [[ "$confirm" =~ ^[yY]$ ]] || exit 1
+    fi
 fi
 
 # --- Verify image exists ------------------------------------------------------
