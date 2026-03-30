@@ -98,7 +98,7 @@ TMPFS_HOME_SIZE="512m" # /home/agent size
 
 ### Claude Code
 
-Installed via the [native installer](https://claude.ai/install.sh), with an npm fallback (`@anthropic-ai/claude-code`). Two authentication methods are supported:
+Installed via the [native installer](https://claude.ai/install.sh) (npm is deprecated and no longer used). Two authentication methods are supported:
 
 - **API key**: set `ANTHROPIC_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
 - **OAuth (Pro/Max subscription)**: run `claude login` on the host first, then `~/.claude/` is automatically mounted into the container
