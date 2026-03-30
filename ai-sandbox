@@ -32,6 +32,8 @@ MAX_MEM="4g"
 MAX_PIDS="512"
 TMPFS_TMP_SIZE="1g"
 TMPFS_HOME_SIZE="512m"
+NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
+DNS="1.1.1.1"                  # explicit DNS to avoid slow resolver
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
 
 # --- Colors -------------------------------------------------------------------
@@ -188,7 +190,7 @@ CMD=(
 if [[ "$NETWORK_OFF" == true ]]; then
     CMD+=(--network=none)
 else
-    CMD+=(--network=slirp4netns)
+    CMD+=(--network="${NETWORK_MODE}" --dns="${DNS}")
 fi
 
 # === API KEY ===
@@ -242,7 +244,7 @@ fi
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
-echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo 'slirp4netns')"
+echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
 echo ""
 
 exec "${CMD[@]}"
