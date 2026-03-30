@@ -98,7 +98,10 @@ TMPFS_HOME_SIZE="512m" # /home/agent size
 
 ### Claude Code
 
-Installed via the [native installer](https://claude.ai/install.sh), with an npm fallback (`@anthropic-ai/claude-code`). Authenticates through `ANTHROPIC_API_KEY`.
+Installed via the [native installer](https://claude.ai/install.sh), with an npm fallback (`@anthropic-ai/claude-code`). Two authentication methods are supported:
+
+- **API key**: set `ANTHROPIC_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
+- **OAuth (Pro/Max subscription)**: run `claude login` on the host first, then `~/.claude/` is automatically mounted into the container
 
 ### Codex
 
@@ -122,6 +125,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3, pip, Git, curl, wge
 -v "${HOME}/.cache/ai-sandbox/${AGENT}:/home/agent/.config:Z"
 ```
 
+- **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config.
 
 ## License

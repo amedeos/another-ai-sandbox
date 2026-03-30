@@ -127,14 +127,19 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# Verify the API key is set (cursor can authenticate via JWT in auth.json)
+# Verify authentication is available
 if [[ -z "${!API_KEY_VAR:-}" ]]; then
-    if [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
+    if [[ "$AGENT" == "claude" && -d "${HOME}/.claude" ]]; then
+        echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
+    elif [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
         echo -e "${CYAN}Using JWT auth from ~/.config/cursor/auth.json${NC}"
     else
         echo -e "${YELLOW}Warning: ${API_KEY_VAR} not set.${NC}"
         echo "Set it with: export ${API_KEY_VAR}=<your-key>"
         echo "Or create it in ${ENV_FILE}"
+        if [[ "$AGENT" == "claude" ]]; then
+            echo "Or run 'claude login' on the host first to create ~/.claude/"
+        fi
         echo ""
         read -rp "Do you want to continue anyway? [y/N] " confirm
         [[ "$confirm" =~ ^[yY]$ ]] || exit 1
@@ -188,6 +193,16 @@ fi
 
 # === API KEY ===
 CMD+=(-e "${API_KEY_VAR}")
+
+# === CLAUDE CONFIG: mount ~/.claude and ~/.claude.json for OAuth + settings ===
+if [[ "$AGENT" == "claude" ]]; then
+    if [[ -d "${HOME}/.claude" ]]; then
+        CMD+=(-v "${HOME}/.claude:/home/agent/.claude:Z")
+    fi
+    if [[ -f "${HOME}/.claude.json" ]]; then
+        CMD+=(-v "${HOME}/.claude.json:/home/agent/.claude.json:Z")
+    fi
+fi
 
 # === CURSOR CONFIG: mount entire .cursor directory rw ===
 if [[ "$AGENT" == "cursor" ]]; then
