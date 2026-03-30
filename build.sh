@@ -86,3 +86,11 @@ case "${TARGET}" in
         exit 1
         ;;
 esac
+
+# Remove dangling images left over from previous builds
+DANGLING=$("${BUILDER}" images --filter dangling=true -q 2>/dev/null)
+if [[ -n "$DANGLING" ]]; then
+    log "Pruning dangling images..."
+    echo "$DANGLING" | xargs "${BUILDER}" rmi -f 2>/dev/null || true
+    log "Done"
+fi
