@@ -32,6 +32,8 @@ MAX_MEM="4g"
 MAX_PIDS="512"
 TMPFS_TMP_SIZE="1g"
 TMPFS_HOME_SIZE="512m"
+NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
+DNS="1.1.1.1"                  # explicit DNS to avoid slow resolver
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
 
 # --- Colors -------------------------------------------------------------------
@@ -127,14 +129,19 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# Verify the API key is set (cursor can authenticate via JWT in auth.json)
+# Verify authentication is available
 if [[ -z "${!API_KEY_VAR:-}" ]]; then
-    if [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
+    if [[ "$AGENT" == "claude" && -d "${HOME}/.claude" ]]; then
+        echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
+    elif [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
         echo -e "${CYAN}Using JWT auth from ~/.config/cursor/auth.json${NC}"
     else
         echo -e "${YELLOW}Warning: ${API_KEY_VAR} not set.${NC}"
         echo "Set it with: export ${API_KEY_VAR}=<your-key>"
         echo "Or create it in ${ENV_FILE}"
+        if [[ "$AGENT" == "claude" ]]; then
+            echo "Or run 'claude login' on the host first to create ~/.claude/"
+        fi
         echo ""
         read -rp "Do you want to continue anyway? [y/N] " confirm
         [[ "$confirm" =~ ^[yY]$ ]] || exit 1
@@ -183,11 +190,21 @@ CMD=(
 if [[ "$NETWORK_OFF" == true ]]; then
     CMD+=(--network=none)
 else
-    CMD+=(--network=slirp4netns)
+    CMD+=(--network="${NETWORK_MODE}" --dns="${DNS}")
 fi
 
 # === API KEY ===
 CMD+=(-e "${API_KEY_VAR}")
+
+# === CLAUDE CONFIG: mount ~/.claude and ~/.claude.json for OAuth + settings ===
+if [[ "$AGENT" == "claude" ]]; then
+    if [[ -d "${HOME}/.claude" ]]; then
+        CMD+=(-v "${HOME}/.claude:/home/agent/.claude:Z")
+    fi
+    if [[ -f "${HOME}/.claude.json" ]]; then
+        CMD+=(-v "${HOME}/.claude.json:/home/agent/.claude.json:Z")
+    fi
+fi
 
 # === CURSOR CONFIG: mount entire .cursor directory rw ===
 if [[ "$AGENT" == "cursor" ]]; then
@@ -227,7 +244,7 @@ fi
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
-echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo 'slirp4netns')"
+echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
 echo ""
 
 exec "${CMD[@]}"

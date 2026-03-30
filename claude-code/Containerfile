@@ -1,23 +1,26 @@
 # =============================================================================
 # Claude Code - sandboxed container
-# Uses the native installer (recommended, npm is deprecated)
-# Auth: ANTHROPIC_API_KEY env var (no browser needed)
+# Native installer (npm is deprecated, Node.js no longer required at runtime)
+# Auth: ANTHROPIC_API_KEY env var or OAuth via ~/.claude/
 # =============================================================================
 FROM localhost/agent-base:latest
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Native installer downloads the binary to ~/.local/bin
-# We install as root to /usr/local/bin to make it available to everyone
-USER root
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && if [ -f /usr/local/bin/claude ]; then chmod 755 /usr/local/bin/claude; fi
+# Install as agent so the installer sets up ~/.local/bin/claude
+USER agent
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Fallback: if native installer doesn't work in container,
-# use npm (still works, just deprecated)
-RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+# Move entire installation to /opt so it survives the tmpfs on /home/agent
+USER root
+RUN cp -rL /home/agent/.local /opt/claude-local \
+    && chmod -R 755 /opt/claude-local/bin \
+    && ln -sf /opt/claude-local/bin/claude /usr/local/bin/claude
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
 
 USER agent
 WORKDIR /workspace
 
-ENTRYPOINT ["claude"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

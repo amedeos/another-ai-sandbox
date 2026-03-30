@@ -64,7 +64,7 @@ Every container is launched with the following hardening measures:
 | `--read-only`                 | Container filesystem is read-only                          |
 | `--pids-limit=512`            | Prevents fork bombs                                        |
 | `--cpus=2 --memory=4g`        | Limits CPU and RAM resources via cgroups v2                |
-| `--network=slirp4netns`       | Userspace network stack, isolated from host                |
+| `--network=pasta`             | Kernel-backed isolated network (fast, uses user namespaces)|
 | `--tmpfs /tmp`                | Temporary writable area, destroyed at session end          |
 | `--mount type=tmpfs,dst=/home/agent` | Agent home on tmpfs (mode 0755), destroyed at session end |
 | Bind mount only `/workspace`  | Agent sees ONLY the project directory                      |
@@ -92,13 +92,18 @@ MAX_MEM="4g"           # RAM limit
 MAX_PIDS="512"         # Process limit
 TMPFS_TMP_SIZE="1g"    # /tmp size
 TMPFS_HOME_SIZE="512m" # /home/agent size
+NETWORK_MODE="pasta"   # "pasta" (fast) or "slirp4netns" (compatible)
+DNS="1.1.1.1"          # Explicit DNS server
 ```
 
 ## Agent Details
 
 ### Claude Code
 
-Installed via the [native installer](https://claude.ai/install.sh), with an npm fallback (`@anthropic-ai/claude-code`). Authenticates through `ANTHROPIC_API_KEY`.
+Installed via the [native installer](https://claude.ai/install.sh) (npm is deprecated and no longer used). Two authentication methods are supported:
+
+- **API key**: set `ANTHROPIC_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
+- **OAuth (Pro/Max subscription)**: run `claude login` on the host first, then `~/.claude/` is automatically mounted into the container
 
 ### Codex
 
@@ -115,13 +120,14 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3, pip, Git, curl, wge
 ## Notes
 
 - **Git**: the script passes `GIT_AUTHOR_NAME`, `GIT_COMMITTER_NAME`, `GIT_AUTHOR_EMAIL`, and `GIT_COMMITTER_EMAIL` from the host so that commits inside the container keep your identity.
-- **Network**: by default uses `slirp4netns`. Pass `-n` to disable network entirely. To filter destinations with nftables, create rules on the host that match traffic from the container's network namespace.
+- **Network**: by default uses `pasta` (faster than `slirp4netns`, uses the kernel's network stack via user namespaces). Change `NETWORK_MODE` to `slirp4netns` if `pasta` is not available. Pass `-n` to disable network entirely. To filter destinations with nftables, create rules on the host that match traffic from the container's network namespace.
 - **Agent config persistence**: `/home/agent` is a tmpfs, so agent config (login, cache) is lost on each restart. For auth, use environment variables. If you want to persist config, add a dedicated volume:
 
 ```bash
 -v "${HOME}/.cache/ai-sandbox/${AGENT}:/home/agent/.config:Z"
 ```
 
+- **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config.
 
 ## License
