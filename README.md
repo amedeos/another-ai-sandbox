@@ -77,9 +77,10 @@ ai-sandbox <agent> [directory] [-- extra args for the agent]
 Agents:   claude | codex | cursor
 
 Options:
-  -n, --network-off   Disable network completely (--network=none)
-  -v, --verbose        Show the podman command being run
-  -h, --help           Show help
+  -n, --network-off       Disable network completely (--network=none)
+  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
+  -v, --verbose           Show the podman command being run
+  -h, --help              Show help
 ```
 
 ## Customization
@@ -93,7 +94,7 @@ MAX_PIDS="512"         # Process limit
 TMPFS_TMP_SIZE="1g"    # /tmp size
 TMPFS_HOME_SIZE="512m" # /home/agent size
 NETWORK_MODE="pasta"   # "pasta" (fast) or "slirp4netns" (compatible)
-DNS="1.1.1.1"          # Explicit DNS server
+DNS="1.1.1.1"          # Default DNS (override with --dns or AI_SANDBOX_DNS)
 ```
 
 ## Agent Details
