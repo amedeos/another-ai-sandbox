@@ -33,7 +33,7 @@ MAX_PIDS="512"
 TMPFS_TMP_SIZE="1g"
 TMPFS_HOME_SIZE="512m"
 NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
-DNS="1.1.1.1"                  # explicit DNS to avoid slow resolver
+DNS="${AI_SANDBOX_DNS:-1.1.1.1}"  # override with AI_SANDBOX_DNS env var or --dns flag
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
 
 # --- Colors -------------------------------------------------------------------
@@ -54,9 +54,10 @@ usage() {
     echo "  cursor  - Cursor Agent CLI"
     echo ""
     echo "Options:"
-    echo "  -n, --network-off   Disable network (no API, local only)"
-    echo "  -v, --verbose       Show the podman command being run"
-    echo "  -h, --help          Show this help"
+    echo "  -n, --network-off       Disable network (no API, local only)"
+    echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
+    echo "  -v, --verbose           Show the podman command being run"
+    echo "  -h, --help              Show this help"
     exit 0
 }
 
@@ -71,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)    usage ;;
         -n|--network-off) NETWORK_OFF=true; shift ;;
+        -d|--dns)     DNS="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=true; shift ;;
         --)           shift; EXTRA_ARGS=("$@"); break ;;
         -*)           echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
