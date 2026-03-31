@@ -22,6 +22,7 @@ jobs:
       - name: Build base image
         run: |
           podman build \
+            --format docker \
             --tag localhost/agent-base:latest \
             --file base/Containerfile \
             base/
@@ -29,6 +30,7 @@ jobs:
       - name: Build claude-code image
         run: |
           podman build \
+            --format docker \
             --tag localhost/agent-claude:latest \
             --file claude-code/Containerfile \
             claude-code/
@@ -36,6 +38,7 @@ jobs:
       - name: Build codex image
         run: |
           podman build \
+            --format docker \
             --tag localhost/agent-codex:latest \
             --file codex/Containerfile \
             codex/
@@ -43,6 +46,7 @@ jobs:
       - name: Build cursor-agent image
         run: |
           podman build \
+            --format docker \
             --tag localhost/agent-cursor:latest \
             --file cursor-agent/Containerfile \
             cursor-agent/
