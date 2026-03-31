@@ -40,6 +40,8 @@ RUN dnf install -y \
         gawk \
         grep \
         ShellCheck \
+        ruff \
+        python3-pytest \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
