@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDER="podman"  # change to "docker" if needed
+BASE_IMAGE="registry.fedoraproject.org/fedora:43"
 
 # Colors for output
 RED='\033[0;31m'
@@ -31,13 +32,20 @@ build_image() {
 
     log "Building ${name} -> ${tag}"
     "${BUILDER}" build \
+        --format docker \
         --tag "${tag}" \
         --file "${dir}/Containerfile" \
         "${dir}"
     log "${name} built successfully"
 }
 
+pull_base_image() {
+    log "Pulling latest ${BASE_IMAGE}..."
+    "${BUILDER}" pull "${BASE_IMAGE}"
+}
+
 build_base() {
+    pull_base_image
     build_image "base" "${SCRIPT_DIR}/base" "localhost/agent-base:latest"
 }
 

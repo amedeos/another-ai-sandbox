@@ -7,6 +7,8 @@ FROM registry.fedoraproject.org/fedora:43
 LABEL maintainer="amedeo" \
       description="Base image for sandboxed AI coding agents"
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Common toolchain for all agents
 RUN dnf install -y \
         nodejs \
@@ -40,6 +42,11 @@ RUN dnf install -y \
         ShellCheck \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# OpenShift client (oc) - latest stable from mirror.openshift.com
+RUN curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
+    | tar xz -C /usr/local/bin oc kubectl \
+    && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl
 
 # Non-root user for agent execution
 RUN useradd -m -s /bin/bash agent
