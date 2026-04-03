@@ -116,7 +116,7 @@ Installed via the official `cursor.com/install` script. The installation is copi
 
 ## Base Image
 
-Built on **Fedora 43** and includes: Node.js, npm, Python 3, pip, pytest, ruff, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
 
 ## Notes
 
