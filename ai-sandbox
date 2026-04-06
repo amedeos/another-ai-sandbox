@@ -35,6 +35,7 @@ TMPFS_HOME_SIZE="512m"
 NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
 DNS="${AI_SANDBOX_DNS:-1.1.1.1}"  # override with AI_SANDBOX_DNS env var or --dns flag
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
+BLOCKED_COMMANDS=""    # Space-separated list of "binary:arg1" pairs, e.g. "git:push git:push --force"
 
 # --- Colors -------------------------------------------------------------------
 RED='\033[0;31m'
@@ -54,6 +55,7 @@ usage() {
     echo "  cursor  - Cursor Agent CLI"
     echo ""
     echo "Options:"
+    echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
     echo "  -n, --network-off       Disable network (no API, local only)"
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
     echo "  -v, --verbose           Show the podman command being run"
@@ -67,10 +69,12 @@ PROJECT_DIR=""
 NETWORK_OFF=false
 VERBOSE=false
 EXTRA_ARGS=()
+BLOCK_CMDS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)    usage ;;
+        -b|--block-cmd) BLOCK_CMDS+=("$2"); shift 2 ;;
         -n|--network-off) NETWORK_OFF=true; shift ;;
         -d|--dns)     DNS="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=true; shift ;;
@@ -92,6 +96,12 @@ done
 if [[ -z "$AGENT" ]]; then
     echo -e "${RED}Error: specify an agent (claude|codex|cursor)${NC}" >&2
     usage
+fi
+
+if [[ -n "$BLOCKED_COMMANDS" ]]; then
+    for bc in $BLOCKED_COMMANDS; do
+        BLOCK_CMDS+=("$bc")
+    done
 fi
 
 PROJECT_DIR="${PROJECT_DIR:-.}"
@@ -159,6 +169,21 @@ if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
     echo -e "${RED}Image ${IMAGE} not found.${NC}"
     echo "Build it with: cd ai-sandbox && ./build.sh ${AGENT}"
     exit 1
+fi
+
+# --- BPF loader path and validation -------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BPF_LOADER="${SCRIPT_DIR}/bpf/loader"
+
+if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
+    if [[ ! -x "$BPF_LOADER" ]]; then
+        echo -e "${RED}Error: BPF loader not found. Run 'make -C bpf/' first.${NC}" >&2
+        exit 1
+    fi
+    if ! sudo -n true 2>/dev/null && ! sudo -v; then
+        echo -e "${RED}Error: sudo access required for BPF command blocking.${NC}" >&2
+        exit 1
+    fi
 fi
 
 # --- Build the podman command -------------------------------------------------
@@ -258,6 +283,114 @@ echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
 echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
+if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
+    echo -e "  Blocked:  ${BLOCK_CMDS[*]}"
+fi
 echo ""
 
-exec "${CMD[@]}"
+if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
+    # === BPF BLOCKING MODE ===
+
+    # Remove -it and --rm from CMD for background run
+    CMD_BG=()
+    for arg in "${CMD[@]}"; do
+        case "$arg" in
+            --rm) continue ;;
+            -it)  continue ;;
+            -i)   continue ;;
+            -t)   continue ;;
+            *)    CMD_BG+=("$arg") ;;
+        esac
+    done
+    # Insert -d after "run"
+    CMD_FINAL=()
+    for arg in "${CMD_BG[@]}"; do
+        CMD_FINAL+=("$arg")
+        if [[ "$arg" == "run" ]]; then
+            CMD_FINAL+=("-d")
+        fi
+    done
+
+    # Start container in background
+    CONTAINER_ID=$("${CMD_FINAL[@]}")
+    if [[ $? -ne 0 || -z "$CONTAINER_ID" ]]; then
+        echo -e "${RED}Error: failed to start container in background${NC}" >&2
+        exit 1
+    fi
+
+    # Cleanup trap
+    cleanup() {
+        if [[ -n "${LOADER_PID:-}" ]]; then
+            sudo kill "$LOADER_PID" 2>/dev/null
+            wait "$LOADER_PID" 2>/dev/null
+        fi
+        "${BUILDER}" rm -f "$CONTAINER_ID" 2>/dev/null
+    }
+    trap cleanup EXIT
+
+    # Wait for container to be running
+    "${BUILDER}" wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1
+
+    # Get cgroup path
+    CGROUP_PATH=$("${BUILDER}" inspect --format '{{.CgroupPath}}' "$CONTAINER_ID" 2>/dev/null)
+    if [[ -z "$CGROUP_PATH" ]]; then
+        echo -e "${RED}Error: could not determine container cgroup path${NC}" >&2
+        exit 1
+    fi
+
+    # Build full cgroup path under /sys/fs/cgroup
+    if [[ "$CGROUP_PATH" != /sys/fs/cgroup/* ]]; then
+        FULL_CGROUP="/sys/fs/cgroup${CGROUP_PATH}"
+    else
+        FULL_CGROUP="$CGROUP_PATH"
+    fi
+
+    # If the path doesn't exist, try the user-scoped path
+    if [[ ! -d "$FULL_CGROUP" ]]; then
+        FULL_CGROUP="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service${CGROUP_PATH}"
+    fi
+
+    if [[ ! -d "$FULL_CGROUP" ]]; then
+        echo -e "${RED}Error: cgroup path not found: ${FULL_CGROUP}${NC}" >&2
+        echo -e "${YELLOW}Try running with --verbose to debug${NC}" >&2
+        exit 1
+    fi
+
+    # Build loader arguments
+    LOADER_ARGS=(--cgroup "$FULL_CGROUP")
+    for bc in "${BLOCK_CMDS[@]}"; do
+        LOADER_ARGS+=(--block "$bc")
+    done
+    if [[ "$VERBOSE" == true ]]; then
+        LOADER_ARGS+=(--verbose)
+    fi
+
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "${CYAN}BPF loader command:${NC}"
+        echo "  sudo ${BPF_LOADER} ${LOADER_ARGS[*]}"
+        echo ""
+    fi
+
+    # Start BPF loader in background
+    sudo "$BPF_LOADER" "${LOADER_ARGS[@]}" &
+    LOADER_PID=$!
+
+    # Give the loader a moment to attach
+    sleep 0.5
+
+    # Check if loader is still running
+    if ! kill -0 "$LOADER_PID" 2>/dev/null; then
+        echo -e "${RED}Error: BPF loader failed to start${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${GREEN}BPF command blocker active${NC} (${#BLOCK_CMDS[@]} rules)"
+    echo ""
+
+    # Attach to container interactively
+    "${BUILDER}" attach "$CONTAINER_ID"
+
+else
+    # === NORMAL MODE (no BPF blocking) ===
+    exec "${CMD[@]}"
+fi
