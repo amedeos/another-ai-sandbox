@@ -333,7 +333,7 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     "${BUILDER}" wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1
 
     # Get cgroup path
-    CGROUP_PATH=$("${BUILDER}" inspect --format '{{.CgroupPath}}' "$CONTAINER_ID" 2>/dev/null)
+    CGROUP_PATH=$("${BUILDER}" inspect --format '{{.State.CgroupPath}}' "$CONTAINER_ID" 2>/dev/null)
     if [[ -z "$CGROUP_PATH" ]]; then
         echo -e "${RED}Error: could not determine container cgroup path${NC}" >&2
         exit 1

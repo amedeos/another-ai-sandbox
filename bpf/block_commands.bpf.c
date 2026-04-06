@@ -47,9 +47,9 @@ int BPF_PROG(block_cmd_check, struct linux_binprm *bprm, int ret)
 
     char filename[MAX_BIN_LEN];
     int fname_len;
+    const char *fname_ptr = BPF_CORE_READ(bprm, filename);
 
-    fname_len = bpf_probe_read_kernel_str(filename, sizeof(filename),
-                                          BPF_CORE_READ(bprm, filename));
+    fname_len = bpf_probe_read_kernel_str(filename, sizeof(filename), fname_ptr);
     if (fname_len <= 0)
         return 0;
 
@@ -66,15 +66,15 @@ int BPF_PROG(block_cmd_check, struct linux_binprm *bprm, int ret)
 
     struct blocked_cmd_key key = {};
 
-    /* Copy basename into key.binary with bounds checking */
-    for (int i = 0; i < MAX_BIN_LEN - 1; i++) {
-        int src = basename_off + i;
-        if (src < 0 || src >= MAX_BIN_LEN)
-            break;
-        if (filename[src] == '\0')
-            break;
-        key.binary[i] = filename[src];
-    }
+    /*
+     * Re-read just the basename directly from kernel memory.
+     * This avoids variable-offset stack access (filename[basename_off + i])
+     * which the BPF verifier rejects. The mask ensures the verifier can
+     * prove basename_off is within [0, MAX_BIN_LEN).
+     */
+    basename_off &= (MAX_BIN_LEN - 1);
+    bpf_probe_read_kernel_str(key.binary, MAX_BIN_LEN,
+                              fname_ptr + basename_off);
 
     /* Read argv[1] from bprm->mm->arg_start */
     unsigned long arg_start = BPF_CORE_READ(bprm, mm, arg_start);
