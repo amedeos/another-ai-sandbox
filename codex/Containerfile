@@ -1,13 +1,16 @@
 # =============================================================================
 # OpenAI Codex CLI - sandboxed container
-# Auth: OPENAI_API_KEY env var
+# Auth: OPENAI_API_KEY env var or OAuth/cached login via ~/.codex/
 # =============================================================================
 FROM localhost/agent-base:latest
 
 USER root
 RUN npm install -g @openai/codex
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
 USER agent
 WORKDIR /workspace
 
-ENTRYPOINT ["codex"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
