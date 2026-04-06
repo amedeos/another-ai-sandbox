@@ -208,6 +208,7 @@ int main(int argc, char **argv)
     }
 
     int cmds_map_fd = bpf_map__fd(skel->maps.blocked_cmds);
+    int cmds_arg_map_fd = bpf_map__fd(skel->maps.blocked_cmds_arg);
     __u8 val = 1;
 
     for (int i = 0; i < num_entries; i++) {
@@ -215,7 +216,9 @@ int main(int argc, char **argv)
         memcpy(key.binary, entries[i].binary, MAX_BIN_LEN);
         memcpy(key.arg1, entries[i].arg1, MAX_ARG_LEN);
 
-        err = bpf_map_update_elem(cmds_map_fd, &key, &val, BPF_ANY);
+        int fd = (entries[i].arg1[0] == '\0') ? cmds_map_fd
+                                              : cmds_arg_map_fd;
+        err = bpf_map_update_elem(fd, &key, &val, BPF_ANY);
         if (err) {
             fprintf(stderr, "Error: failed to add blocked command '%s:%s': %s\n",
                     entries[i].binary, entries[i].arg1, strerror(errno));
