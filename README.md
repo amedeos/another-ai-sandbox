@@ -8,12 +8,21 @@ Rootless Podman containers to run AI coding agents (Claude Code, Codex, Cursor A
 ai-sandbox/
 ├── base/
 │   └── Containerfile          # Base image (Fedora 43, Node.js, Python, Git, ripgrep, …)
+├── bpf/
+│   ├── block_commands.bpf.c   # BPF LSM program (hooks bprm_check_security)
+│   ├── block_commands.h       # Shared structures (blocked_cmd_key)
+│   ├── config.h               # Configuration defines (MAX_BIN_LEN, etc.)
+│   ├── loader.c               # Userspace loader (libbpf skeleton)
+│   ├── Makefile               # Build system for BPF program and loader
+│   └── README.md              # BPF component documentation
 ├── claude-code/
 │   └── Containerfile          # Claude Code (native installer + npm fallback)
 ├── codex/
 │   └── Containerfile          # OpenAI Codex CLI
 ├── cursor-agent/
 │   └── Containerfile          # Cursor Agent CLI (installed to /opt to survive tmpfs)
+├── test/
+│   └── test_bpf_blocker.sh   # End-to-end tests for BPF command blocker
 ├── build.sh                   # Build script for images
 ├── ai-sandbox                 # Wrapper to start agents
 ├── LICENSE                    # GPLv3
@@ -68,6 +77,7 @@ Every container is launched with the following hardening measures:
 | `--tmpfs /tmp`                | Temporary writable area, destroyed at session end          |
 | `--mount type=tmpfs,dst=/home/agent` | Agent home on tmpfs (mode 0755), destroyed at session end |
 | Bind mount only `/workspace`  | Agent sees ONLY the project directory                      |
+| BPF LSM command blocker       | Blocks specific commands (e.g. git push) inside the container via eBPF |
 
 ## Usage
 
@@ -77,6 +87,7 @@ ai-sandbox <agent> [directory] [-- extra args for the agent]
 Agents:   claude | codex | cursor
 
 Options:
+  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
   -v, --verbose           Show the podman command being run
@@ -134,6 +145,24 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
 - **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config.
+
+## Command Blocking (BPF LSM)
+
+You can optionally block specific commands inside the sandbox using a BPF LSM program that intercepts `execve` calls within the container's cgroup:
+
+```bash
+ai-sandbox claude ~/project --block-cmd "git:push"
+```
+
+This requires a kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list (`cat /sys/kernel/security/lsm`). Build the BPF loader first:
+
+```bash
+make -C bpf/
+```
+
+The BPF loader runs with `sudo` (required for loading BPF programs). The `ai-sandbox` wrapper handles this automatically when `--block-cmd` is passed. Blocking is scoped to the container's cgroup v2 — host processes are never affected.
+
+See [bpf/README.md](bpf/README.md) for full details on kernel requirements, build dependencies, and how it works.
 
 ## License
 
