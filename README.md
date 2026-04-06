@@ -148,11 +148,34 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 
 ## Command Blocking (BPF LSM)
 
-You can optionally block specific commands inside the sandbox using a BPF LSM program that intercepts `execve` calls within the container's cgroup:
+You can optionally block specific commands inside the sandbox using eBPF programs that intercept `execve` calls within the container's cgroup. The `--block-cmd` (`-b`) flag is repeatable.
+
+The format is `binary:arg1` where `arg1` is optional:
 
 ```bash
+# Block git push (git with any other argument is allowed)
 ai-sandbox claude ~/project --block-cmd "git:push"
+
+# Block git entirely, regardless of arguments
+ai-sandbox claude ~/project --block-cmd "git:"
+
+# Block multiple commands
+ai-sandbox cursor ~/project \
+  --block-cmd "git:push" \
+  --block-cmd "git:push --force" \
+  --block-cmd "curl:" \
+  --block-cmd "wget:"
+
+# Combine with other options
+ai-sandbox codex ~/project --block-cmd "rm:" --network-off
 ```
+
+How blocking works depends on the rule type:
+
+- **Binary-only rules** (`git:`, `curl:`) — blocked via the LSM hook *before* exec completes. The command is never executed (`-EPERM`).
+- **Binary+arg rules** (`git:push`, `git:push --force`) — enforced via a tracepoint *after* exec, when argv is readable. The process is killed immediately (`SIGKILL`).
+
+### Setup
 
 This requires a kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list (`cat /sys/kernel/security/lsm`). Build the BPF loader first:
 
