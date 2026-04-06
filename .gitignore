@@ -1,0 +1,5 @@
+# BPF build artifacts
+bpf/vmlinux.h
+bpf/block_commands.bpf.o
+bpf/block_commands.skel.h
+bpf/loader
