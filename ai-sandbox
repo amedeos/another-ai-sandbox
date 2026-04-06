@@ -356,6 +356,21 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
         exit 1
     fi
 
+    # Podman rootless creates a child cgroup (e.g. "container") under the
+    # scope where processes actually run.  Walk down to the leaf so the BPF
+    # cgroup ID matches what bpf_get_current_cgroup_id() returns.
+    while true; do
+        CHILDREN=()
+        for child in "$FULL_CGROUP"/*/; do
+            [[ -d "$child" ]] && CHILDREN+=("${child%/}")
+        done
+        if [[ ${#CHILDREN[@]} -eq 1 ]]; then
+            FULL_CGROUP="${CHILDREN[0]}"
+        else
+            break
+        fi
+    done
+
     # Build loader arguments
     LOADER_ARGS=(--cgroup "$FULL_CGROUP")
     for bc in "${BLOCK_CMDS[@]}"; do
@@ -366,6 +381,7 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     fi
 
     if [[ "$VERBOSE" == true ]]; then
+        echo -e "${CYAN}Cgroup path: ${FULL_CGROUP}${NC}"
         echo -e "${CYAN}BPF loader command:${NC}"
         echo "  sudo ${BPF_LOADER} ${LOADER_ARGS[*]}"
         echo ""

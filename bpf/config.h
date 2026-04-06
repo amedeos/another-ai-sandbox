@@ -10,4 +10,8 @@
 #define MAX_ARG_LEN 64
 #define MAX_BLOCKED_CMDS 64
 
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+
 #endif
