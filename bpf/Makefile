@@ -3,7 +3,7 @@
 #
 # Build system for BPF program and userspace loader.
 # Targets: vmlinux.h, block_commands.bpf.o, block_commands.skel.h, loader,
-#          clean, install.
+#          clean.
 #
 # Build dependencies:
 #   Fedora: dnf install clang llvm libbpf-devel bpftool elfutils-libelf-devel zlib-devel
@@ -15,10 +15,9 @@ BPFTOOL    ?= bpftool
 CC         ?= gcc
 ARCH       := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 VMLINUX    := /sys/kernel/btf/vmlinux
-PREFIX     ?= /usr/local
-DESTDIR    ?=
+LOADER_DIR ?= $(HOME)/.local/bin
 
-.PHONY: all clean install
+.PHONY: all clean
 
 all: loader
 
@@ -39,10 +38,9 @@ loader: loader.c block_commands.skel.h block_commands.h config.h
 		-I. \
 		-o loader loader.c \
 		-lbpf -lelf -lz
+	install -d $(LOADER_DIR)
+	install -m 755 loader $(LOADER_DIR)/ai-sandbox-loader
 
 clean:
 	rm -f vmlinux.h block_commands.bpf.o block_commands.skel.h loader
-
-install: loader
-	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 755 loader $(DESTDIR)$(PREFIX)/bin/bpf-sandbox-loader
+	rm -f $(LOADER_DIR)/ai-sandbox-loader
