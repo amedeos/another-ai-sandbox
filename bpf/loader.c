@@ -4,6 +4,8 @@
 // Userspace loader (libbpf): loads the BPF program, populates blocked_cmds and
 // target_cgroup maps, attaches to LSM hook, handles cleanup on SIGINT/SIGTERM.
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
