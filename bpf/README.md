@@ -38,6 +38,8 @@ cd bpf/
 make
 ```
 
+This compiles the BPF program and the userspace loader, then installs the loader to `~/.local/bin/ai-sandbox-loader`. Override with `make LOADER_DIR=/other/path`.
+
 ## Usage
 
 ```bash

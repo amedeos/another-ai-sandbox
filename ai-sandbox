@@ -172,12 +172,13 @@ if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
 fi
 
 # --- BPF loader path and validation -------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BPF_LOADER="${SCRIPT_DIR}/bpf/loader"
+BPF_LOADER="${AI_SANDBOX_BPF_LOADER:-${HOME}/.local/bin/ai-sandbox-loader}"
 
 if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     if [[ ! -x "$BPF_LOADER" ]]; then
-        echo -e "${RED}Error: BPF loader not found. Run 'make -C bpf/' first.${NC}" >&2
+        echo -e "${RED}Error: BPF loader not found at ${BPF_LOADER}.${NC}" >&2
+        echo -e "${RED}Build it with 'make -C bpf/' (installs to ~/.local/bin/ai-sandbox-loader),${NC}" >&2
+        echo -e "${RED}or set AI_SANDBOX_BPF_LOADER=/path/to/loader.${NC}" >&2
         exit 1
     fi
     if ! sudo -n true 2>/dev/null && ! sudo -v; then

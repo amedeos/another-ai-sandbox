@@ -160,6 +160,8 @@ This requires a kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list (`cat /
 make -C bpf/
 ```
 
+This compiles the loader and installs it to `~/.local/bin/ai-sandbox-loader`, where `ai-sandbox` expects to find it. You can override the install location with `make -C bpf/ LOADER_DIR=/other/path` and point the script to it via `AI_SANDBOX_BPF_LOADER=/other/path/ai-sandbox-loader`.
+
 The BPF loader runs with `sudo` (required for loading BPF programs). The `ai-sandbox` wrapper handles this automatically when `--block-cmd` is passed. Blocking is scoped to the container's cgroup v2 — host processes are never affected.
 
 See [bpf/README.md](bpf/README.md) for full details on kernel requirements, build dependencies, and how it works.
