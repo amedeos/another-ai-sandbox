@@ -292,7 +292,7 @@ echo ""
 if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     # === BPF BLOCKING MODE ===
 
-    # Remove -it and --rm from CMD for background run
+    # Replace --rm and -it with -dit for background run with TTY+stdin
     CMD_BG=()
     for arg in "${CMD[@]}"; do
         case "$arg" in
@@ -303,12 +303,11 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
             *)    CMD_BG+=("$arg") ;;
         esac
     done
-    # Insert -d after "run"
     CMD_FINAL=()
     for arg in "${CMD_BG[@]}"; do
         CMD_FINAL+=("$arg")
         if [[ "$arg" == "run" ]]; then
-            CMD_FINAL+=("-d")
+            CMD_FINAL+=("-dit")
         fi
     done
 
