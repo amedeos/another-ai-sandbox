@@ -108,7 +108,10 @@ Installed via the [native installer](https://claude.ai/install.sh) (npm is depre
 
 ### Codex
 
-Installed via `npm install -g @openai/codex`. Authenticates through `OPENAI_API_KEY`.
+Installed via `npm install -g @openai/codex`. Two authentication methods are supported:
+
+- **API key**: set `OPENAI_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
+- **OAuth (ChatGPT login)**: run `codex login` on the host first, then `~/.codex/` is automatically mounted into the container (contains `auth.json` and `config.toml`)
 
 ### Cursor Agent
 
@@ -129,6 +132,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 ```
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
+- **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config.
 
 ## License

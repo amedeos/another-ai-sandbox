@@ -135,6 +135,8 @@ fi
 if [[ -z "${!API_KEY_VAR:-}" ]]; then
     if [[ "$AGENT" == "claude" && -d "${HOME}/.claude" ]]; then
         echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
+    elif [[ "$AGENT" == "codex" && -d "${HOME}/.codex" ]]; then
+        echo -e "${CYAN}Using cached login from ~/.codex${NC}"
     elif [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
         echo -e "${CYAN}Using JWT auth from ~/.config/cursor/auth.json${NC}"
     else
@@ -143,6 +145,8 @@ if [[ -z "${!API_KEY_VAR:-}" ]]; then
         echo "Or create it in ${ENV_FILE}"
         if [[ "$AGENT" == "claude" ]]; then
             echo "Or run 'claude login' on the host first to create ~/.claude/"
+        elif [[ "$AGENT" == "codex" ]]; then
+            echo "Or run 'codex login' on the host first to create ~/.codex/"
         fi
         echo ""
         read -rp "Do you want to continue anyway? [y/N] " confirm
@@ -217,6 +221,13 @@ if [[ "$AGENT" == "cursor" ]]; then
     # auth.json: ro (contains JWT tokens, no need to write)
     if [[ -f "${HOME}/.config/cursor/auth.json" ]]; then
         CMD+=(-v "${HOME}/.config/cursor/auth.json:/home/agent/.config/cursor/auth.json:ro,Z")
+    fi
+fi
+
+# === CODEX CONFIG: mount ~/.codex for OAuth + settings ===
+if [[ "$AGENT" == "codex" ]]; then
+    if [[ -d "${HOME}/.codex" ]]; then
+        CMD+=(-v "${HOME}/.codex:/home/agent/.codex:Z")
     fi
 fi
 
