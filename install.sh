@@ -1,17 +1,23 @@
 #!/bin/bash
 # =============================================================================
-# install.sh - Installs ai-sandbox and optionally builds container images
+# install.sh - Installs (or uninstalls) ai-sandbox
 #
 # Usage:
 #   ./install.sh              # full install: script + images + BPF (if possible)
 #   ./install.sh --no-build   # install script only, skip image build
+#   ./install.sh --uninstall  # remove everything installed by this script
 #
-# What it does:
+# Install:
 #   1. Checks host prerequisites (podman, pasta, git, cgroups v2)
 #   2. Installs the ai-sandbox script to ~/.local/bin/
 #   3. Builds container images via build.sh (unless --no-build)
 #   4. Detects if BPF compilation is possible and builds the loader
 #   5. Checks if ~/.local/bin is in PATH, offers to add it
+#
+# Uninstall:
+#   Removes ai-sandbox and ai-sandbox-loader from ~/.local/bin,
+#   optionally removes container images and ~/.config/ai-sandbox,
+#   and cleans the PATH line added to the shell profile.
 # =============================================================================
 set -euo pipefail
 
@@ -31,20 +37,23 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 
 # --- Argument parsing ---------------------------------------------------------
 DO_BUILD=true
+DO_UNINSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
-        --no-build) DO_BUILD=false ;;
+        --no-build)  DO_BUILD=false ;;
+        --uninstall) DO_UNINSTALL=true ;;
         -h|--help)
-            echo "Usage: $0 [--no-build]"
+            echo "Usage: $0 [--no-build] [--uninstall]"
             echo ""
             echo "  --no-build   Skip container image build (build.sh all)"
+            echo "  --uninstall  Remove ai-sandbox, BPF loader, images, and config"
             echo "  -h, --help   Show this help"
             exit 0
             ;;
         *)
             err "Unknown option: ${arg}"
-            echo "Usage: $0 [--no-build]"
+            echo "Usage: $0 [--no-build] [--uninstall]"
             exit 1
             ;;
     esac
@@ -293,9 +302,119 @@ offer_path_fix() {
     esac
 }
 
+# --- Uninstall ----------------------------------------------------------------
+do_uninstall() {
+    echo ""
+    echo -e "${CYAN}ai-sandbox uninstaller${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    local removed=0
+
+    # 1. Remove binaries from ~/.local/bin
+    if [[ -f "${INSTALL_DIR}/ai-sandbox" ]]; then
+        rm -f "${INSTALL_DIR}/ai-sandbox"
+        log "Removed ${INSTALL_DIR}/ai-sandbox"
+        removed=1
+    else
+        info "ai-sandbox not found in ${INSTALL_DIR} — skipping"
+    fi
+
+    if [[ -f "${INSTALL_DIR}/ai-sandbox-loader" ]]; then
+        rm -f "${INSTALL_DIR}/ai-sandbox-loader"
+        log "Removed ${INSTALL_DIR}/ai-sandbox-loader"
+        removed=1
+    fi
+
+    # 2. Container images
+    if command -v podman >/dev/null 2>&1; then
+        local images=()
+        for img in agent-base agent-claude agent-codex agent-cursor; do
+            if podman image exists "localhost/${img}:latest" 2>/dev/null; then
+                images+=("localhost/${img}:latest")
+            fi
+        done
+
+        if [[ ${#images[@]} -gt 0 ]]; then
+            echo ""
+            warn "Found ${#images[@]} container image(s):"
+            for img in "${images[@]}"; do
+                echo -e "  - ${img}"
+            done
+            echo -en "\n  Remove them? [y/N] "
+            read -r answer
+            if [[ "$answer" =~ ^[yY]$ ]]; then
+                for img in "${images[@]}"; do
+                    podman rmi -f "$img" 2>/dev/null && log "Removed image ${img}"
+                done
+                removed=1
+            else
+                info "Keeping container images"
+            fi
+        fi
+    fi
+
+    # 3. Config directory
+    if [[ -d "${HOME}/.config/ai-sandbox" ]]; then
+        echo ""
+        warn "Found config directory: ~/.config/ai-sandbox/"
+        echo -en "  Remove it? [y/N] "
+        read -r answer
+        if [[ "$answer" =~ ^[yY]$ ]]; then
+            rm -rf "${HOME}/.config/ai-sandbox"
+            log "Removed ~/.config/ai-sandbox/"
+            removed=1
+        else
+            info "Keeping ~/.config/ai-sandbox/"
+        fi
+    fi
+
+    # 4. Clean PATH line from shell profile
+    local profile
+    profile="$(detect_shell_profile)"
+    if [[ -f "$profile" ]] && grep -qF '# Added by ai-sandbox install.sh' "$profile" 2>/dev/null; then
+        echo ""
+        warn "Found ai-sandbox PATH entry in ${profile}"
+        echo -en "  Remove it? [Y/n] "
+        read -r answer
+        case "$answer" in
+            [nN]*)
+                info "Keeping PATH entry in ${profile}"
+                ;;
+            *)
+                # Remove the comment line and the line immediately after it
+                local tmp
+                tmp="$(mktemp)"
+                awk '
+                    /^# Added by ai-sandbox install.sh$/ { skip=1; next }
+                    skip { skip=0; next }
+                    { print }
+                ' "$profile" > "$tmp"
+                mv "$tmp" "$profile"
+                log "Removed ai-sandbox PATH entry from ${profile}"
+                removed=1
+                ;;
+        esac
+    fi
+
+    echo ""
+    if [[ $removed -eq 1 ]]; then
+        log "Uninstall complete"
+    else
+        info "Nothing to remove — ai-sandbox was not installed"
+    fi
+    echo ""
+}
+
 # =============================================================================
 # Main
 # =============================================================================
+
+if [[ "$DO_UNINSTALL" == true ]]; then
+    do_uninstall
+    exit 0
+fi
+
 echo ""
 echo -e "${CYAN}ai-sandbox installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
