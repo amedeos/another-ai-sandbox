@@ -197,8 +197,9 @@ can_build_bpf() {
         done
         echo ""
         info "Install hints:"
-        info "  Fedora:  dnf install clang llvm libbpf-devel bpftool elfutils-libelf-devel zlib-devel"
-        info "  Gentoo:  emerge -av sys-devel/clang sys-devel/llvm dev-libs/libbpf sys-apps/bpftool dev-libs/elfutils sys-libs/zlib"
+        info "  Fedora:        dnf install clang llvm libbpf-devel bpftool elfutils-libelf-devel zlib-devel"
+        info "  Debian/Ubuntu: apt install clang llvm libbpf-dev linux-tools-common libelf-dev zlib1g-dev"
+        info "  Gentoo:        emerge -av sys-devel/clang sys-devel/llvm dev-libs/libbpf sys-apps/bpftool dev-libs/elfutils sys-libs/zlib"
         return 1
     fi
 
