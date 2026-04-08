@@ -183,6 +183,60 @@ You'll see lines like:
 - `BLOCKED` — binary-only rule fired (LSM hook, exec denied with `-EPERM`)
 - `BLOCKED+KILL` — binary+arg rule fired (tracepoint, process killed with `SIGKILL`)
 
+### Inspecting BPF State
+
+Use `bpftool` to inspect loaded programs, maps, and links. All commands require `sudo`.
+
+**Programs** — verify both hooks are loaded:
+
+```bash
+sudo bpftool prog list | grep -A2 block_cmd
+```
+
+You should see two entries: `block_cmd_check` (LSM) and `block_cmd_arg_check` (tracepoint).
+
+**Maps** — verify rules and target cgroup:
+
+```bash
+# List all BPF maps
+sudo bpftool map list
+
+# Dump binary-only rules (arg1 empty)
+sudo bpftool map dump name blocked_cmds
+
+# Dump binary+arg rules
+sudo bpftool map dump name blocked_cmds_arg
+
+# Dump target cgroup ID
+sudo bpftool map dump name target_cgroup
+```
+
+**Links** — verify hooks are attached:
+
+```bash
+sudo bpftool link list
+```
+
+Look for entries referencing `block_cmd_check` (LSM attach) and `block_cmd_arg_check` (tracing attach).
+
+### Manual Cleanup
+
+Normally the loader handles cleanup automatically via `block_commands_bpf__destroy()` when it receives `SIGINT` or `SIGTERM`. These commands are only needed if the loader was killed abnormally (e.g. `SIGKILL`) and BPF programs remain attached.
+
+```bash
+# Find orphaned links
+sudo bpftool link list
+# Look for entries with prog name "block_cmd_check" or "block_cmd_arg_check"
+
+# Delete a link (detaches the hook and frees resources)
+sudo bpftool link delete id <LINK_ID>
+
+# Verify cleanup is complete (should return nothing)
+sudo bpftool prog list | grep block_cmd
+```
+
+Repeat `link delete` for each orphaned link. Once no programs show up in `prog list`, the system is clean.
+
 ### Common Issues
 
 | Problem | Cause | Fix |
@@ -192,3 +246,4 @@ You'll see lines like:
 | `cannot open cgroup path` | Wrong cgroup path or container not running | Verify with `podman inspect --format '{{.State.CgroupPath}}'` |
 | `name_to_handle_at failed` | Kernel too old or cgroup2 not mounted | Check `mount | grep cgroup2` |
 | Command not blocked | Binary name longer than 63 chars, or arg1 mismatch | Check limits in `config.h`; use `--verbose` to verify rules |
+| Programs still loaded after stopping loader | Loader killed with `SIGKILL` or crashed | See [Manual Cleanup](#manual-cleanup) above |
