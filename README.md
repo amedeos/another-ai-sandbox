@@ -23,6 +23,7 @@ ai-sandbox/
 │   └── Containerfile          # Cursor Agent CLI (installed to /opt to survive tmpfs)
 ├── test/
 │   └── test_bpf_blocker.sh   # End-to-end tests for BPF command blocker
+├── install.sh                 # Installer (and uninstaller) script
 ├── build.sh                   # Build script for images
 ├── ai-sandbox                 # Wrapper to start agents
 ├── LICENSE                    # GPLv3
@@ -32,14 +33,17 @@ ai-sandbox/
 ## Requirements
 
 - [Podman](https://podman.io/) (rootless) — tested with v4+
+- [passt/pasta](https://passt.top/) — network backend (default mode; `slirp4netns` works as fallback)
+- Git
 - cgroups v2 enabled (default on recent Fedora, Arch, Debian 12+, Ubuntu 24.04+)
+
+The installer checks all of these automatically. See [install.sh](#install) for details.
 
 ## Quick Start
 
 ```bash
-# 1. Build all images (or just one: ./build.sh claude)
-chmod +x build.sh
-./build.sh all
+# 1. Install (checks prerequisites, builds images, installs to ~/.local/bin)
+./install.sh
 
 # 2. Configure API keys (once)
 mkdir -p ~/.config/ai-sandbox
@@ -50,16 +54,32 @@ CURSOR_API_KEY=...
 EOF
 chmod 600 ~/.config/ai-sandbox/env
 
-# 3. Install the wrapper
-chmod +x ai-sandbox
-cp ai-sandbox ~/bin/        # or ~/.local/bin/
-
-# 4. Use it!
+# 3. Use it!
 ai-sandbox claude ~/projects/my-repo
 ai-sandbox codex  .
 ai-sandbox cursor ~/projects/other -- chat "find bugs"
 ai-sandbox claude                   # uses current directory
 ```
+
+## Install
+
+The `install.sh` script handles the full setup:
+
+```bash
+./install.sh              # full install: prerequisites check, images, BPF (if possible)
+./install.sh --no-build   # install the script only, skip container image build
+./install.sh --uninstall  # remove everything (binaries, images, config, PATH entry)
+```
+
+What it does:
+
+1. **Checks host prerequisites** — verifies podman, pasta/passt, git, realpath, cgroups v2, and sudo are available. Stops on missing required dependencies; warns on optional ones.
+2. **Installs `ai-sandbox`** to `~/.local/bin/`.
+3. **Builds container images** via `build.sh all` (skip with `--no-build`).
+4. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
+5. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
+
+To uninstall, `--uninstall` removes `~/.local/bin/ai-sandbox`, `~/.local/bin/ai-sandbox-loader`, and interactively offers to remove container images, `~/.config/ai-sandbox/`, and the PATH entry from your shell profile.
 
 ## Security Model
 
@@ -177,7 +197,9 @@ How blocking works depends on the rule type:
 
 ### Setup
 
-This requires a kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list (`cat /sys/kernel/security/lsm`). Build the BPF loader first:
+This requires a kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list (`cat /sys/kernel/security/lsm`).
+
+If you ran `./install.sh`, the BPF loader was built and installed automatically (provided the toolchain and kernel support were detected). To build it manually:
 
 ```bash
 make -C bpf/
