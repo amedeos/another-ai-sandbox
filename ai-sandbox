@@ -201,7 +201,10 @@ CMD=(
     --pids-limit="${MAX_PIDS}"              # Prevent fork bombs
 
     # === RESOURCES ===
-    --cpus="${MAX_CPUS}"
+    # NOTE: --cpus requires CONFIG_CFS_BANDWIDTH=y in the kernel.
+    # If your kernel lacks it, cpu.max won't exist and crun will fail.
+    # Uncomment the next line if your kernel supports CFS bandwidth:
+    # --cpus="${MAX_CPUS}"
     --memory="${MAX_MEM}"
 
     # === FILESYSTEM ===
