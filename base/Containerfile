@@ -35,6 +35,7 @@ RUN dnf install -y \
         tree \
         ansible \
         ansible-lint \
+        binutils \
         file \
         less \
         which \
@@ -48,6 +49,7 @@ RUN dnf install -y \
         ShellCheck \
         ruff \
         python3-pytest \
+    && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
