@@ -111,7 +111,6 @@ Options:
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
       --home-size <size>   Size of /home/agent tmpfs (default: 1g, units: b, k, m, g)
-      --skip-space-check   Skip project dir vs home size check (warn instead of error)
   -v, --verbose           Show the podman command being run
   -h, --help              Show help
 ```

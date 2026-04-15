@@ -54,18 +54,6 @@ validate_size() {
     fi
 }
 
-size_to_bytes() {
-    local value="$1"
-    local num="${value%%[a-z]*}"
-    local suffix="${value##*[0-9]}"
-    case "$suffix" in
-        b) echo $(( num )) ;;
-        k) echo $(( num * 1024 )) ;;
-        m) echo $(( num * 1024 * 1024 )) ;;
-        g) echo $(( num * 1024 * 1024 * 1024 )) ;;
-    esac
-}
-
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
@@ -82,7 +70,6 @@ usage() {
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
-    echo "      --skip-space-check  Skip project directory vs home size check (warn only)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
     exit 0
@@ -93,7 +80,6 @@ AGENT=""
 PROJECT_DIR=""
 NETWORK_OFF=false
 VERBOSE=false
-SKIP_SPACE_CHECK=false
 EXTRA_ARGS=()
 BLOCK_CMDS=()
 
@@ -104,7 +90,6 @@ while [[ $# -gt 0 ]]; do
         -n|--network-off) NETWORK_OFF=true; shift ;;
         -d|--dns)     DNS="$2"; shift 2 ;;
         --home-size)  TMPFS_HOME_SIZE="$2"; shift 2 ;;
-        --skip-space-check) SKIP_SPACE_CHECK=true; shift ;;
         -v|--verbose) VERBOSE=true; shift ;;
         --)           shift; EXTRA_ARGS=("$@"); break ;;
         -*)           echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
@@ -142,27 +127,6 @@ fi
 
 # --- Validate home size -------------------------------------------------------
 validate_size "$TMPFS_HOME_SIZE"
-
-# --- Check project directory size vs home tmpfs size --------------------------
-PROJECT_SIZE_BYTES=$(du -sb "$PROJECT_DIR" 2>/dev/null | awk '{print $1}')
-HOME_SIZE_BYTES=$(size_to_bytes "$TMPFS_HOME_SIZE")
-
-if [[ -n "$PROJECT_SIZE_BYTES" && -n "$HOME_SIZE_BYTES" ]] && (( PROJECT_SIZE_BYTES > HOME_SIZE_BYTES )); then
-    PROJECT_SIZE_HUMAN=$(du -sh "$PROJECT_DIR" 2>/dev/null | awk '{print $1}')
-    if [[ "$SKIP_SPACE_CHECK" == true ]]; then
-        echo -e "${YELLOW}Warning: project directory (${PROJECT_SIZE_HUMAN}) exceeds home tmpfs size (${TMPFS_HOME_SIZE}).${NC}" >&2
-        echo -e "${YELLOW}The agent home may run out of space. Continuing due to --skip-space-check.${NC}" >&2
-        echo ""
-    else
-        echo -e "${RED}Error: project directory (${PROJECT_SIZE_HUMAN}) exceeds home tmpfs size (${TMPFS_HOME_SIZE}).${NC}" >&2
-        echo -e "${RED}The agent may not have enough space in /home/agent.${NC}" >&2
-        echo ""
-        echo "Options:" >&2
-        echo "  --home-size <size>     Increase home tmpfs (e.g. --home-size 4g)" >&2
-        echo "  --skip-space-check     Skip this check and start anyway" >&2
-        exit 1
-    fi
-fi
 
 # --- Select image and API key -------------------------------------------------
 case "$AGENT" in
