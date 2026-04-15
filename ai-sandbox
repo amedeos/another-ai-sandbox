@@ -31,7 +31,7 @@ MAX_CPUS="2"
 MAX_MEM="4g"
 MAX_PIDS="512"
 TMPFS_TMP_SIZE="1g"
-TMPFS_HOME_SIZE="512m"
+TMPFS_HOME_SIZE="1g"
 NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
 DNS="${AI_SANDBOX_DNS:-1.1.1.1}"  # override with AI_SANDBOX_DNS env var or --dns flag
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
@@ -43,6 +43,16 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+validate_size() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[0-9]+[bkmg]$ ]]; then
+        echo -e "${RED}Error: invalid size '${value}'.${NC}" >&2
+        echo "Use a number followed by a unit: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)" >&2
+        echo "Examples: 512m, 1g, 2g, 4096m" >&2
+        exit 1
+    fi
+}
 
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
@@ -58,6 +68,8 @@ usage() {
     echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
     echo "  -n, --network-off       Disable network (no API, local only)"
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
+    echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
+    echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
     exit 0
@@ -77,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         -b|--block-cmd) BLOCK_CMDS+=("$2"); shift 2 ;;
         -n|--network-off) NETWORK_OFF=true; shift ;;
         -d|--dns)     DNS="$2"; shift 2 ;;
+        --home-size)  TMPFS_HOME_SIZE="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=true; shift ;;
         --)           shift; EXTRA_ARGS=("$@"); break ;;
         -*)           echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
@@ -111,6 +124,9 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
     echo -e "${RED}Error: directory not found: ${PROJECT_DIR}${NC}" >&2
     exit 1
 fi
+
+# --- Validate home size -------------------------------------------------------
+validate_size "$TMPFS_HOME_SIZE"
 
 # --- Select image and API key -------------------------------------------------
 case "$AGENT" in
@@ -286,6 +302,7 @@ fi
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
+echo -e "  Home size: ${TMPFS_HOME_SIZE}"
 echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
 if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     echo -e "  Blocked:  ${BLOCK_CMDS[*]}"

@@ -110,6 +110,7 @@ Options:
   -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
+      --home-size <size>   Size of /home/agent tmpfs (default: 1g, units: b, k, m, g)
   -v, --verbose           Show the podman command being run
   -h, --help              Show help
 ```
@@ -123,7 +124,7 @@ MAX_CPUS="2"           # Number of CPUs
 MAX_MEM="4g"           # RAM limit
 MAX_PIDS="512"         # Process limit
 TMPFS_TMP_SIZE="1g"    # /tmp size
-TMPFS_HOME_SIZE="512m" # /home/agent size
+TMPFS_HOME_SIZE="1g"   # /home/agent size (units: b, k, m, g)
 NETWORK_MODE="pasta"   # "pasta" (fast) or "slirp4netns" (compatible)
 DNS="1.1.1.1"          # Default DNS (override with --dns or AI_SANDBOX_DNS)
 ```
