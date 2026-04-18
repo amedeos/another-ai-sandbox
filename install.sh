@@ -9,13 +9,15 @@
 #
 # Install:
 #   1. Checks host prerequisites (podman, pasta, git, cgroups v2)
-#   2. Installs the ai-sandbox script to ~/.local/bin/
-#   3. Builds container images via build.sh (unless --no-build)
-#   4. Detects if BPF compilation is possible and builds the loader
-#   5. Checks if ~/.local/bin is in PATH, offers to add it
+#   2. Installs ai-sandbox and ai-sandbox-build to ~/.local/bin/
+#   3. Copies Containerfiles/entrypoints to ~/.local/share/ai-sandbox/
+#   4. Builds container images via ai-sandbox-build (unless --no-build)
+#   5. Detects if BPF compilation is possible and builds the loader
+#   6. Checks if ~/.local/bin is in PATH, offers to add it
 #
 # Uninstall:
-#   Removes ai-sandbox and ai-sandbox-loader from ~/.local/bin,
+#   Removes ai-sandbox, ai-sandbox-build, and ai-sandbox-loader from
+#   ~/.local/bin, removes build data from ~/.local/share/ai-sandbox/,
 #   optionally removes container images and ~/.config/ai-sandbox,
 #   and cleans the PATH line added to the shell profile.
 # =============================================================================
@@ -23,6 +25,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${HOME}/.local/bin"
+DATA_DIR="${HOME}/.local/share/ai-sandbox"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -46,7 +49,7 @@ for arg in "$@"; do
         -h|--help)
             echo "Usage: $0 [--no-build] [--uninstall]"
             echo ""
-            echo "  --no-build   Skip container image build (build.sh all)"
+            echo "  --no-build   Skip container image build"
             echo "  --uninstall  Remove ai-sandbox, BPF loader, images, and config"
             echo "  -h, --help   Show this help"
             exit 0
@@ -137,20 +140,43 @@ install_script() {
     log "Installing ai-sandbox to ${INSTALL_DIR}/"
     install -d "${INSTALL_DIR}"
     install -m 755 "${SCRIPT_DIR}/ai-sandbox" "${INSTALL_DIR}/ai-sandbox"
-    log "ai-sandbox installed successfully"
+    install -m 755 "${SCRIPT_DIR}/ai-sandbox-build" "${INSTALL_DIR}/ai-sandbox-build"
+    log "ai-sandbox and ai-sandbox-build installed successfully"
+}
+
+# --- Install build data (Containerfiles, entrypoints) ------------------------
+install_build_data() {
+    log "Installing build data to ${DATA_DIR}/"
+    install -d "${DATA_DIR}"
+
+    for component in base claude-code codex cursor-agent; do
+        local src="${SCRIPT_DIR}/${component}"
+        local dst="${DATA_DIR}/${component}"
+        if [[ ! -d "$src" ]]; then
+            warn "Source directory not found: ${src} — skipping"
+            continue
+        fi
+        install -d "${dst}"
+        install -m 644 "${src}/Containerfile" "${dst}/Containerfile"
+        if [[ -f "${src}/entrypoint.sh" ]]; then
+            install -m 755 "${src}/entrypoint.sh" "${dst}/entrypoint.sh"
+        fi
+    done
+
+    log "Build data installed successfully"
 }
 
 # --- Build container images ---------------------------------------------------
 build_images() {
     log "Building container images (this may take a few minutes)..."
     echo ""
-    if "${SCRIPT_DIR}/build.sh" all; then
+    if "${INSTALL_DIR}/ai-sandbox-build" all; then
         echo ""
         log "All container images built successfully"
     else
         echo ""
         err "Image build failed"
-        err "You can retry later with: ./build.sh all"
+        err "You can retry later with: ai-sandbox --build all"
         return 1
     fi
 }
@@ -321,13 +347,26 @@ do_uninstall() {
         info "ai-sandbox not found in ${INSTALL_DIR} — skipping"
     fi
 
+    if [[ -f "${INSTALL_DIR}/ai-sandbox-build" ]]; then
+        rm -f "${INSTALL_DIR}/ai-sandbox-build"
+        log "Removed ${INSTALL_DIR}/ai-sandbox-build"
+        removed=1
+    fi
+
     if [[ -f "${INSTALL_DIR}/ai-sandbox-loader" ]]; then
         rm -f "${INSTALL_DIR}/ai-sandbox-loader"
         log "Removed ${INSTALL_DIR}/ai-sandbox-loader"
         removed=1
     fi
 
-    # 2. Container images
+    # 2. Remove build data from ~/.local/share/ai-sandbox
+    if [[ -d "${DATA_DIR}" ]]; then
+        rm -rf "${DATA_DIR}"
+        log "Removed ${DATA_DIR}"
+        removed=1
+    fi
+
+    # 3. Container images
     if command -v podman >/dev/null 2>&1; then
         local images=()
         for img in agent-base agent-claude agent-codex agent-cursor; do
@@ -355,7 +394,7 @@ do_uninstall() {
         fi
     fi
 
-    # 3. Config directory
+    # 4. Config directory
     if [[ -d "${HOME}/.config/ai-sandbox" ]]; then
         echo ""
         warn "Found config directory: ~/.config/ai-sandbox/"
@@ -370,7 +409,7 @@ do_uninstall() {
         fi
     fi
 
-    # 4. Clean PATH line from shell profile
+    # 5. Clean PATH line from shell profile
     local profile
     profile="$(detect_shell_profile)"
     if [[ -f "$profile" ]] && grep -qF '# Added by ai-sandbox install.sh' "$profile" 2>/dev/null; then
@@ -424,8 +463,9 @@ echo ""
 # 1. Check host prerequisites
 check_prerequisites
 
-# 2. Install the main script
+# 2. Install the main script and build data
 install_script
+install_build_data
 echo ""
 
 # 3. Build container images (unless --no-build)
@@ -434,7 +474,7 @@ if [[ "$DO_BUILD" == true ]]; then
     echo ""
 else
     info "Skipping container image build (--no-build)"
-    info "Run './build.sh all' later to build the images"
+    info "Run 'ai-sandbox --build all' later to build the images"
     echo ""
 fi
 
@@ -473,7 +513,7 @@ if [[ "$DO_BUILD" == true ]]; then
     info "  2. Run:                 ai-sandbox claude ~/my-project"
 else
     info "Next steps:"
-    info "  1. Build container images:  ./build.sh all"
+    info "  1. Build container images:  ai-sandbox --build all"
     info "  2. Configure API keys:      mkdir -p ~/.config/ai-sandbox && vi ~/.config/ai-sandbox/env"
     info "  3. Run:                      ai-sandbox claude ~/my-project"
 fi

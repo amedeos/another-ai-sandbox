@@ -6,12 +6,15 @@
 #   ai-sandbox claude [directory] [-- extra args for the agent]
 #   ai-sandbox codex  [directory] [-- extra args]
 #   ai-sandbox cursor [directory] [-- extra args]
+#   ai-sandbox --build [all|base|claude|codex|cursor]
 #
 # Examples:
 #   ai-sandbox claude ~/projects/my-repo
 #   ai-sandbox codex  .
 #   ai-sandbox cursor ~/projects/other -- chat "find bugs"
 #   ai-sandbox claude                       # uses current directory
+#   ai-sandbox --build claude               # rebuild claude image
+#   ai-sandbox --build                      # rebuild all images
 #
 # API keys are read from environment variables:
 #   ANTHROPIC_API_KEY  - for Claude Code
@@ -58,6 +61,7 @@ usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
     echo "Usage: ai-sandbox <agent> [directory] [-- extra args]"
+    echo "       ai-sandbox --build [target]"
     echo ""
     echo "Available agents:"
     echo "  claude  - Claude Code (Anthropic)"
@@ -70,6 +74,7 @@ usage() {
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
+    echo "      --build [target]    Build container images (target: all|base|claude|codex|cursor)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
     exit 0
@@ -86,6 +91,16 @@ BLOCK_CMDS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)    usage ;;
+        --build)
+            BUILD_BIN="${AI_SANDBOX_BUILD:-${HOME}/.local/bin/ai-sandbox-build}"
+            if [[ ! -x "$BUILD_BIN" ]]; then
+                echo -e "${RED}Error: ai-sandbox-build not found at ${BUILD_BIN}${NC}" >&2
+                echo "Run install.sh first, or set AI_SANDBOX_BUILD=/path/to/ai-sandbox-build" >&2
+                exit 1
+            fi
+            shift
+            exec "$BUILD_BIN" "$@"
+            ;;
         -b|--block-cmd) BLOCK_CMDS+=("$2"); shift 2 ;;
         -n|--network-off) NETWORK_OFF=true; shift ;;
         -d|--dns)     DNS="$2"; shift 2 ;;
@@ -183,7 +198,7 @@ fi
 # --- Verify image exists ------------------------------------------------------
 if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
     echo -e "${RED}Image ${IMAGE} not found.${NC}"
-    echo "Build it with: cd ai-sandbox && ./build.sh ${AGENT}"
+    echo "Build it with: ai-sandbox --build ${AGENT}"
     exit 1
 fi
 

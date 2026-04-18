@@ -24,8 +24,8 @@ ai-sandbox/
 ├── test/
 │   └── test_bpf_blocker.sh   # End-to-end tests for BPF command blocker
 ├── install.sh                 # Installer (and uninstaller) script
-├── build.sh                   # Build script for images
 ├── ai-sandbox                 # Wrapper to start agents
+├── ai-sandbox-build           # Build script for container images
 ├── LICENSE                    # GPLv3
 └── README.md
 ```
@@ -74,12 +74,13 @@ The `install.sh` script handles the full setup:
 What it does:
 
 1. **Checks host prerequisites** — verifies podman, pasta/passt, git, realpath, cgroups v2, and sudo are available. Stops on missing required dependencies; warns on optional ones.
-2. **Installs `ai-sandbox`** to `~/.local/bin/`.
-3. **Builds container images** via `build.sh all` (skip with `--no-build`).
-4. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
-5. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
+2. **Installs `ai-sandbox` and `ai-sandbox-build`** to `~/.local/bin/`.
+3. **Copies Containerfiles and entrypoints** to `~/.local/share/ai-sandbox/`.
+4. **Builds container images** via `ai-sandbox-build all` (skip with `--no-build`).
+5. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
+6. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
 
-To uninstall, `--uninstall` removes `~/.local/bin/ai-sandbox`, `~/.local/bin/ai-sandbox-loader`, and interactively offers to remove container images, `~/.config/ai-sandbox/`, and the PATH entry from your shell profile.
+To uninstall, `--uninstall` removes `~/.local/bin/ai-sandbox`, `~/.local/bin/ai-sandbox-build`, `~/.local/bin/ai-sandbox-loader`, and `~/.local/share/ai-sandbox/`, then interactively offers to remove container images, `~/.config/ai-sandbox/`, and the PATH entry from your shell profile.
 
 ## Security Model
 
@@ -103,6 +104,7 @@ Every container is launched with the following hardening measures:
 
 ```
 ai-sandbox <agent> [directory] [-- extra args for the agent]
+ai-sandbox --build [all|base|claude|codex|cursor]
 
 Agents:   claude | codex | cursor
 
@@ -111,6 +113,7 @@ Options:
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
       --home-size <size>   Size of /home/agent tmpfs (default: 1g, units: b, k, m, g)
+      --build [target]     Build container images (target: all|base|claude|codex|cursor)
   -v, --verbose           Show the podman command being run
   -h, --help              Show help
 ```
