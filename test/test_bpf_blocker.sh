@@ -88,7 +88,7 @@ check_prerequisites() {
         echo -e "  ${GREEN}✓${NC} BTF support"
     fi
 
-    if ! cat /sys/kernel/security/lsm 2>/dev/null | grep -q bpf; then
+    if ! grep -q bpf /sys/kernel/security/lsm 2>/dev/null; then
         echo -e "  ${RED}✗${NC} bpf not in LSM list (cat /sys/kernel/security/lsm)"
         ok=false
     else
@@ -160,6 +160,9 @@ setup_blocked_container() {
     git init "$tmpdir" &>/dev/null
     git -C "$tmpdir" commit --allow-empty -m "init" &>/dev/null
 
+    local workdir
+    workdir="/workspace/$(basename "$tmpdir")"
+
     CONTAINER_ID=$(podman run -d --rm \
         --name "$CONTAINER_NAME" \
         --userns=keep-id \
@@ -167,8 +170,8 @@ setup_blocked_container() {
         --read-only \
         --tmpfs /tmp:rw \
         --mount "type=tmpfs,destination=/home/agent,tmpfs-mode=0755,U=true" \
-        -v "${tmpdir}:/workspace:Z" \
-        -w /workspace \
+        -v "${tmpdir}:${workdir}:Z" \
+        -w "${workdir}" \
         "$TEST_IMAGE" sleep 300)
 
     podman wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1

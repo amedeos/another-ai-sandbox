@@ -140,6 +140,14 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
     exit 1
 fi
 
+# Mount under /workspace/<name> so each project gets a distinct path for agent state
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+if [[ -z "$PROJECT_NAME" || "$PROJECT_NAME" == "." || "$PROJECT_NAME" == ".." || "$PROJECT_NAME" == */* ]]; then
+    echo -e "${RED}Error: invalid project directory name: '${PROJECT_NAME}'${NC}" >&2
+    exit 1
+fi
+CONTAINER_WORKDIR="/workspace/${PROJECT_NAME}"
+
 # --- Validate home size -------------------------------------------------------
 validate_size "$TMPFS_HOME_SIZE"
 
@@ -240,14 +248,14 @@ CMD=(
 
     # === FILESYSTEM ===
     # Container is read-only, except:
-    #   - /workspace: project directory (bind mount rw)
+    #   - /workspace/<project-name>: project directory (bind mount rw)
     #   - /tmp: tmpfs for temporary files
     #   - /home/agent: tmpfs for agent config/cache (mode=0755 for bind mounts)
     --read-only
-    -v "${PROJECT_DIR}:/workspace:Z"
+    -v "${PROJECT_DIR}:${CONTAINER_WORKDIR}:Z"
     --tmpfs "/tmp:rw,size=${TMPFS_TMP_SIZE}"
     --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755,U=true"
-    -w /workspace
+    -w "${CONTAINER_WORKDIR}"
 
     # === NETWORK ===
     # slirp4netns: userspace network stack, isolated from host

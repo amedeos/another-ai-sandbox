@@ -97,7 +97,7 @@ Every container is launched with the following hardening measures:
 | `--network=pasta`             | Kernel-backed isolated network (fast, uses user namespaces)|
 | `--tmpfs /tmp`                | Temporary writable area, destroyed at session end          |
 | `--mount type=tmpfs,dst=/home/agent` | Agent home on tmpfs (mode 0755), destroyed at session end |
-| Bind mount only `/workspace`  | Agent sees ONLY the project directory                      |
+| Bind mount only `/workspace/<project-name>` | Agent sees ONLY the project directory                      |
 | BPF LSM command blocker       | Blocks specific commands (e.g. git push) inside the container via eBPF |
 
 ## Usage
