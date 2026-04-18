@@ -88,7 +88,7 @@ check_prerequisites() {
         echo -e "  ${GREEN}✓${NC} BTF support"
     fi
 
-    if ! cat /sys/kernel/security/lsm 2>/dev/null | grep -q bpf; then
+    if ! grep -q bpf /sys/kernel/security/lsm 2>/dev/null; then
         echo -e "  ${RED}✗${NC} bpf not in LSM list (cat /sys/kernel/security/lsm)"
         ok=false
     else
