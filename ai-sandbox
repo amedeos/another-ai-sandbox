@@ -142,7 +142,7 @@ fi
 
 # Mount under /workspace/<name> so each project gets a distinct path for agent state
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
-if [[ -z "$PROJECT_NAME" || "$PROJECT_NAME" == "." || "$PROJECT_NAME" == ".." || "$PROJECT_NAME" == */* || "$PROJECT_NAME" == *$'\0'* ]]; then
+if [[ -z "$PROJECT_NAME" || "$PROJECT_NAME" == "." || "$PROJECT_NAME" == ".." || "$PROJECT_NAME" == */* ]]; then
     echo -e "${RED}Error: invalid project directory name: '${PROJECT_NAME}'${NC}" >&2
     exit 1
 fi
