@@ -64,7 +64,7 @@ RUN curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 RUN groupadd -g "${AGENT_GID}" agent \
-    && useradd -m -s /bin/bash -u "${AGENT_UID}" -g "${AGENT_GID}" agent
+    && useradd -l -m -s /bin/bash -u "${AGENT_UID}" -g "${AGENT_GID}" agent
 
 # Standard working directory
 WORKDIR /workspace
