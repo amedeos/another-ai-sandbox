@@ -59,7 +59,12 @@ RUN curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/
     && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl
 
 # Non-root user for agent execution
-RUN useradd -m -s /bin/bash agent
+# UID/GID default to 1000; override at build time with:
+#   --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g)
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+RUN groupadd -g "${AGENT_GID}" agent \
+    && useradd -m -s /bin/bash -u "${AGENT_UID}" -g "${AGENT_GID}" agent
 
 # Standard working directory
 WORKDIR /workspace

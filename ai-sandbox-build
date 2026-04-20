@@ -56,6 +56,8 @@ build_image() {
     local name="$1"
     local dir="$2"
     local tag="$3"
+    shift 3
+    local extra_args=("$@")
 
     if [[ ! -f "${dir}/Containerfile" ]]; then
         err "Containerfile not found: ${dir}/Containerfile"
@@ -66,6 +68,7 @@ build_image() {
     "${BUILDER}" build \
         --format docker \
         --tag "${tag}" \
+        ${extra_args[@]+"${extra_args[@]}"} \
         --file "${dir}/Containerfile" \
         "${dir}"
     log "${name} built successfully"
@@ -78,7 +81,9 @@ pull_base_image() {
 
 build_base() {
     pull_base_image
-    build_image "base" "${DATA_DIR}/base" "localhost/agent-base:latest"
+    build_image "base" "${DATA_DIR}/base" "localhost/agent-base:latest" \
+        --build-arg "AGENT_UID=$(id -u)" \
+        --build-arg "AGENT_GID=$(id -g)"
 }
 
 build_claude() {
