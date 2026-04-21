@@ -150,7 +150,7 @@ Installed via `npm install -g @openai/codex`. Two authentication methods are sup
 
 ### Cursor Agent
 
-Installed via the official `cursor.com/install` script. The installation is copied to `/opt/cursor-agent` at build time so that it survives the tmpfs mount on `/home/agent` at runtime. Authenticates through `CURSOR_API_KEY` or via `~/.config/cursor/auth.json` (mounted read-only into the container).
+Installed via the official `cursor.com/install` script. The installation is copied to `/opt/cursor-agent` at build time so that it survives the tmpfs mount on `/home/agent` at runtime. Authenticates through `CURSOR_API_KEY` or via `~/.config/cursor/` (bind-mounted read-write into the container). The `~/.config/cursor/` directory is created automatically by `install.sh` if it doesn't exist.
 
 ## Base Image
 
@@ -168,7 +168,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
 - **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
-- **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config.
+- **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config. `~/.config/cursor/` is also bind-mounted read-write for auth and configuration persistence.
 
 ## Command Blocking (BPF LSM)
 
