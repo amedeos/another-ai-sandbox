@@ -234,7 +234,7 @@ CMD=(
     --name "${CONTAINER_NAME}"
 
     # === ISOLATION ===
-    --userns=keep-id:uid=1000,gid=1000      # Map host user to agent (UID 1000) inside container
+    "--userns=keep-id:uid=1000,gid=1000"     # Map host user to agent (UID 1000) inside container
     --cap-drop=ALL                          # Remove all Linux capabilities
     --security-opt=no-new-privileges        # No escalation
     --pids-limit="${MAX_PIDS}"              # Prevent fork bombs
