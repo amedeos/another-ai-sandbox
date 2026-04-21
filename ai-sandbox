@@ -186,8 +186,8 @@ if [[ -z "${!API_KEY_VAR:-}" ]]; then
         echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
     elif [[ "$AGENT" == "codex" && -d "${HOME}/.codex" ]]; then
         echo -e "${CYAN}Using cached login from ~/.codex${NC}"
-    elif [[ "$AGENT" == "cursor" && -f "${HOME}/.config/cursor/auth.json" ]]; then
-        echo -e "${CYAN}Using JWT auth from ~/.config/cursor/auth.json${NC}"
+    elif [[ "$AGENT" == "cursor" && -d "${HOME}/.config/cursor" ]]; then
+        echo -e "${CYAN}Using config from ~/.config/cursor/${NC}"
     else
         echo -e "${YELLOW}Warning: ${API_KEY_VAR} not set.${NC}"
         echo "Set it with: export ${API_KEY_VAR}=<your-key>"
@@ -286,9 +286,9 @@ if [[ "$AGENT" == "cursor" ]]; then
     if [[ -d "${HOME}/.cursor" ]]; then
         CMD+=(-v "${HOME}/.cursor:/home/agent/.cursor:Z")
     fi
-    # auth.json: ro (contains JWT tokens, no need to write)
-    if [[ -f "${HOME}/.config/cursor/auth.json" ]]; then
-        CMD+=(-v "${HOME}/.config/cursor/auth.json:/home/agent/.config/cursor/auth.json:ro,Z")
+    # ~/.config/cursor: rw (auth.json, config, etc.)
+    if [[ -d "${HOME}/.config/cursor" ]]; then
+        CMD+=(-v "${HOME}/.config/cursor:/home/agent/.config/cursor:Z")
     fi
 fi
 

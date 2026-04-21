@@ -166,6 +166,21 @@ install_build_data() {
     log "Build data installed successfully"
 }
 
+# --- Ensure host directories for agent configs exist -------------------------
+ensure_host_dirs() {
+    local cursor_config="${HOME}/.config/cursor"
+    if [[ ! -d "$cursor_config" ]]; then
+        log "Creating ${cursor_config}/"
+        install -d "$cursor_config"
+    fi
+
+    local cursor_dot="${HOME}/.cursor"
+    if [[ ! -d "$cursor_dot" ]]; then
+        log "Creating ${cursor_dot}/"
+        install -d "$cursor_dot"
+    fi
+}
+
 # --- Build container images ---------------------------------------------------
 build_images() {
     log "Building container images (this may take a few minutes)..."
@@ -466,6 +481,7 @@ check_prerequisites
 # 2. Install the main script and build data
 install_script
 install_build_data
+ensure_host_dirs
 echo ""
 
 # 3. Build container images (unless --no-build)
