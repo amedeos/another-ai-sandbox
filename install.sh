@@ -168,6 +168,41 @@ install_build_data() {
 
 # --- Ensure host directories for agent configs exist -------------------------
 ensure_host_dirs() {
+    local sandbox_config="${HOME}/.config/ai-sandbox"
+    if [[ ! -d "$sandbox_config" ]]; then
+        log "Creating ${sandbox_config}/"
+        install -d "$sandbox_config"
+    fi
+
+    local env_file="${sandbox_config}/env"
+    if [[ ! -f "$env_file" ]]; then
+        log "Creating ${env_file}"
+        cat > "$env_file" <<'EOF'
+# ai-sandbox environment — add your API keys here
+# ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+# CURSOR_API_KEY=...
+#
+# Claude via Vertex AI
+# CLAUDE_CODE_USE_VERTEX=1
+# CLOUD_ML_REGION=global
+# ANTHROPIC_VERTEX_PROJECT_ID=GCP_PROJECT_ID
+EOF
+        chmod 600 "$env_file"
+    fi
+
+    local vertex_dir="${sandbox_config}/claude-vertex"
+    if [[ ! -d "$vertex_dir" ]]; then
+        log "Creating ${vertex_dir}/"
+        install -d "$vertex_dir"
+    fi
+
+    local vertex_json="${sandbox_config}/claude-vertex.json"
+    if [[ ! -f "$vertex_json" ]]; then
+        log "Creating ${vertex_json}"
+        echo '{}' > "$vertex_json"
+    fi
+
     local cursor_config="${HOME}/.config/cursor"
     if [[ ! -d "$cursor_config" ]]; then
         log "Creating ${cursor_config}/"
@@ -525,12 +560,12 @@ log "Installation complete!"
 echo ""
 if [[ "$DO_BUILD" == true ]]; then
     info "Next steps:"
-    info "  1. Configure API keys:  mkdir -p ~/.config/ai-sandbox && vi ~/.config/ai-sandbox/env"
+    info "  1. Configure API keys:  vi ~/.config/ai-sandbox/env"
     info "  2. Run:                 ai-sandbox claude ~/my-project"
 else
     info "Next steps:"
     info "  1. Build container images:  ai-sandbox --build all"
-    info "  2. Configure API keys:      mkdir -p ~/.config/ai-sandbox && vi ~/.config/ai-sandbox/env"
+    info "  2. Configure API keys:      vi ~/.config/ai-sandbox/env"
     info "  3. Run:                      ai-sandbox claude ~/my-project"
 fi
 echo ""

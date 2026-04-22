@@ -3,13 +3,15 @@
 # ai-sandbox - Starts an AI coding agent in a sandboxed container
 #
 # Usage:
-#   ai-sandbox claude [directory] [-- extra args for the agent]
-#   ai-sandbox codex  [directory] [-- extra args]
-#   ai-sandbox cursor [directory] [-- extra args]
+#   ai-sandbox claude        [directory] [-- extra args for the agent]
+#   ai-sandbox claude-vertex [directory] [-- extra args]
+#   ai-sandbox codex         [directory] [-- extra args]
+#   ai-sandbox cursor        [directory] [-- extra args]
 #   ai-sandbox --build [all|base|claude|codex|cursor]
 #
 # Examples:
 #   ai-sandbox claude ~/projects/my-repo
+#   ai-sandbox claude-vertex ~/projects/my-repo
 #   ai-sandbox codex  .
 #   ai-sandbox cursor ~/projects/other -- chat "find bugs"
 #   ai-sandbox claude                       # uses current directory
@@ -17,9 +19,15 @@
 #   ai-sandbox --build                      # rebuild all images
 #
 # API keys are read from environment variables:
-#   ANTHROPIC_API_KEY  - for Claude Code
+#   ANTHROPIC_API_KEY  - for Claude Code (direct API)
 #   OPENAI_API_KEY     - for Codex
 #   CURSOR_API_KEY     - for Cursor Agent
+#
+# For Claude via Vertex AI (claude-vertex), set in ~/.config/ai-sandbox/env:
+#   CLAUDE_CODE_USE_VERTEX=1
+#   CLOUD_ML_REGION=global
+#   ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project-id>
+# and ensure ~/.config/gcloud/ exists with valid credentials.
 #
 # Optional: create ~/.config/ai-sandbox/env with the keys:
 #   ANTHROPIC_API_KEY=sk-ant-...
@@ -64,9 +72,10 @@ usage() {
     echo "       ai-sandbox --build [target]"
     echo ""
     echo "Available agents:"
-    echo "  claude  - Claude Code (Anthropic)"
-    echo "  codex   - Codex CLI (OpenAI)"
-    echo "  cursor  - Cursor Agent CLI"
+    echo "  claude        - Claude Code (Anthropic, direct API key)"
+    echo "  claude-vertex - Claude Code via Vertex AI (GCP auth)"
+    echo "  codex         - Codex CLI (OpenAI)"
+    echo "  cursor        - Cursor Agent CLI"
     echo ""
     echo "Options:"
     echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
@@ -122,7 +131,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$AGENT" ]]; then
-    echo -e "${RED}Error: specify an agent (claude|codex|cursor)${NC}" >&2
+    echo -e "${RED}Error: specify an agent (claude|claude-vertex|codex|cursor)${NC}" >&2
     usage
 fi
 
@@ -157,6 +166,10 @@ case "$AGENT" in
         IMAGE="localhost/agent-claude:latest"
         API_KEY_VAR="ANTHROPIC_API_KEY"
         ;;
+    claude-vertex)
+        IMAGE="localhost/agent-claude:latest"
+        API_KEY_VAR=""
+        ;;
     codex)
         IMAGE="localhost/agent-codex:latest"
         API_KEY_VAR="OPENAI_API_KEY"
@@ -167,7 +180,7 @@ case "$AGENT" in
         ;;
     *)
         echo -e "${RED}Unknown agent: ${AGENT}${NC}" >&2
-        echo "Valid agents: claude, codex, cursor"
+        echo "Valid agents: claude, claude-vertex, codex, cursor"
         exit 1
         ;;
 esac
@@ -181,7 +194,31 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 # Verify authentication is available
-if [[ -z "${!API_KEY_VAR:-}" ]]; then
+if [[ "$AGENT" == "claude-vertex" ]]; then
+    # Vertex AI requires GCP credentials and three env vars
+    VERTEX_VARS=(CLAUDE_CODE_USE_VERTEX CLOUD_ML_REGION ANTHROPIC_VERTEX_PROJECT_ID)
+    VERTEX_MISSING=()
+    for var in "${VERTEX_VARS[@]}"; do
+        if [[ -z "${!var:-}" ]]; then
+            VERTEX_MISSING+=("$var")
+        fi
+    done
+    if [[ ${#VERTEX_MISSING[@]} -gt 0 ]]; then
+        echo -e "${RED}Error: missing required Vertex AI variables in ${ENV_FILE}:${NC}" >&2
+        for var in "${VERTEX_MISSING[@]}"; do
+            echo -e "  ${RED}✗${NC} ${var}" >&2
+        done
+        exit 1
+    fi
+
+    GCLOUD_DIR="${HOME}/.config/gcloud"
+    if [[ ! -d "$GCLOUD_DIR" ]]; then
+        echo -e "${RED}Error: ${GCLOUD_DIR} not found.${NC}" >&2
+        echo "Run 'gcloud auth application-default login' on the host first." >&2
+        exit 1
+    fi
+    echo -e "${CYAN}Using Vertex AI (project: ${ANTHROPIC_VERTEX_PROJECT_ID}, region: ${CLOUD_ML_REGION})${NC}"
+elif [[ -n "$API_KEY_VAR" && -z "${!API_KEY_VAR:-}" ]]; then
     if [[ "$AGENT" == "claude" && -d "${HOME}/.claude" ]]; then
         echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
     elif [[ "$AGENT" == "codex" && -d "${HOME}/.codex" ]]; then
@@ -206,7 +243,9 @@ fi
 # --- Verify image exists ------------------------------------------------------
 if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
     echo -e "${RED}Image ${IMAGE} not found.${NC}"
-    echo "Build it with: ai-sandbox --build ${AGENT}"
+    build_target="${AGENT}"
+    [[ "$build_target" == "claude-vertex" ]] && build_target="claude"
+    echo "Build it with: ai-sandbox --build ${build_target}"
     exit 1
 fi
 
@@ -267,8 +306,14 @@ else
     CMD+=(--network="${NETWORK_MODE}" --dns="${DNS}")
 fi
 
-# === API KEY ===
-CMD+=(-e "${API_KEY_VAR}")
+# === API KEY / ENV FILE ===
+if [[ "$AGENT" == "claude-vertex" ]]; then
+    # Pass Vertex vars explicitly so they work whether they come from
+    # the env file, from the user's shell environment, or both.
+    CMD+=(-e CLAUDE_CODE_USE_VERTEX -e CLOUD_ML_REGION -e ANTHROPIC_VERTEX_PROJECT_ID)
+else
+    CMD+=(-e "${API_KEY_VAR}")
+fi
 
 # === CLAUDE CONFIG: mount ~/.claude and ~/.claude.json for OAuth + settings ===
 if [[ "$AGENT" == "claude" ]]; then
@@ -278,6 +323,26 @@ if [[ "$AGENT" == "claude" ]]; then
     if [[ -f "${HOME}/.claude.json" ]]; then
         CMD+=(-v "${HOME}/.claude.json:/home/agent/.claude.json:Z")
     fi
+fi
+
+# === CLAUDE-VERTEX CONFIG: gcloud credentials + isolated claude state ===
+# Uses dedicated paths under ~/.config/ai-sandbox/ so that vertex sessions
+# are fully separated from the personal ~/.claude/ and ~/.claude.json.
+if [[ "$AGENT" == "claude-vertex" ]]; then
+    CMD+=(-v "${HOME}/.config/gcloud:/home/agent/.config/gcloud:ro,Z")
+
+    VERTEX_CLAUDE_DIR="${HOME}/.config/ai-sandbox/claude-vertex"
+    VERTEX_CLAUDE_JSON="${HOME}/.config/ai-sandbox/claude-vertex.json"
+
+    if [[ ! -d "$VERTEX_CLAUDE_DIR" ]]; then
+        install -d "$VERTEX_CLAUDE_DIR"
+    fi
+    if [[ ! -f "$VERTEX_CLAUDE_JSON" ]]; then
+        echo '{}' > "$VERTEX_CLAUDE_JSON"
+    fi
+
+    CMD+=(-v "${VERTEX_CLAUDE_DIR}:/home/agent/.claude:Z")
+    CMD+=(-v "${VERTEX_CLAUDE_JSON}:/home/agent/.claude.json:Z")
 fi
 
 # === CURSOR CONFIG: mount entire .cursor directory rw ===
