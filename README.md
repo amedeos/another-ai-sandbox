@@ -160,7 +160,7 @@ Additionally, `~/.config/gcloud/` must exist on the host with valid credentials 
 
 If `~/.claude/` exists on the host, it is mounted into the container for settings persistence, but `~/.claude/.credentials.json` is always masked (replaced by an empty file) to prevent OAuth credentials from leaking into the container.
 
-Environment variables are passed via `--env-file` so they don't appear in the process command line.
+Vertex variables can be defined in `~/.config/ai-sandbox/env` or exported in the shell — both work. They are passed to the container via `-e` from the current process environment.
 
 ### Codex
 
@@ -188,7 +188,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 ```
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
-- **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. `~/.claude` is mounted if present, but `.credentials.json` is masked with `/dev/null` to avoid leaking OAuth tokens. All Vertex-specific variables are passed via `--env-file` (not visible in `ps`).
+- **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. `~/.claude` is mounted if present, but `.credentials.json` is masked with `/dev/null` to avoid leaking OAuth tokens. Vertex variables work both from `~/.config/ai-sandbox/env` and from shell exports.
 - **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config. `~/.config/cursor/` is also bind-mounted read-write for auth and configuration persistence.
 
