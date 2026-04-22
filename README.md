@@ -1,6 +1,6 @@
 # AI Agent Sandbox
 
-Rootless Podman containers to run AI coding agents (Claude Code, Codex, Cursor Agent) in isolation. Each agent runs in a hardened, read-only container with minimal capabilities, resource limits and an isolated network stack.
+Rootless Podman containers to run AI coding agents (Claude Code, Claude Code via Vertex AI, Codex, Cursor Agent) in isolation. Each agent runs in a hardened, read-only container with minimal capabilities, resource limits and an isolated network stack.
 
 ## Structure
 
@@ -45,20 +45,24 @@ The installer checks all of these automatically. See [install.sh](#install) for 
 # 1. Install (checks prerequisites, builds images, installs to ~/.local/bin)
 ./install.sh
 
-# 2. Configure API keys (once)
-mkdir -p ~/.config/ai-sandbox
-cat > ~/.config/ai-sandbox/env << 'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-CURSOR_API_KEY=...
-EOF
-chmod 600 ~/.config/ai-sandbox/env
+# 2. Configure API keys (the env file is created automatically by install.sh)
+vi ~/.config/ai-sandbox/env
+# Uncomment and fill in the keys you need:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   OPENAI_API_KEY=sk-...
+#   CURSOR_API_KEY=...
+#
+# For Claude via Vertex AI, also set:
+#   CLAUDE_CODE_USE_VERTEX=1
+#   CLOUD_ML_REGION=global
+#   ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project-id>
 
 # 3. Use it!
 ai-sandbox claude ~/projects/my-repo
+ai-sandbox claude-vertex ~/projects/my-repo   # via Vertex AI + GCP credentials
 ai-sandbox codex  .
 ai-sandbox cursor ~/projects/other -- chat "find bugs"
-ai-sandbox claude                   # uses current directory
+ai-sandbox claude                              # uses current directory
 ```
 
 ## Install
@@ -76,9 +80,10 @@ What it does:
 1. **Checks host prerequisites** — verifies podman, pasta/passt, git, realpath, cgroups v2, and sudo are available. Stops on missing required dependencies; warns on optional ones.
 2. **Installs `ai-sandbox` and `ai-sandbox-build`** to `~/.local/bin/`.
 3. **Copies Containerfiles and entrypoints** to `~/.local/share/ai-sandbox/`.
-4. **Builds container images** via `ai-sandbox-build all` (skip with `--no-build`).
-5. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
-6. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
+4. **Creates `~/.config/ai-sandbox/`** and a template `env` file (mode 600) if they don't exist.
+5. **Builds container images** via `ai-sandbox-build all` (skip with `--no-build`).
+6. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
+7. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
 
 To uninstall, `--uninstall` removes `~/.local/bin/ai-sandbox`, `~/.local/bin/ai-sandbox-build`, `~/.local/bin/ai-sandbox-loader`, and `~/.local/share/ai-sandbox/`, then interactively offers to remove container images, `~/.config/ai-sandbox/`, and the PATH entry from your shell profile.
 
@@ -106,7 +111,7 @@ Every container is launched with the following hardening measures:
 ai-sandbox <agent> [directory] [-- extra args for the agent]
 ai-sandbox --build [all|base|claude|codex|cursor]
 
-Agents:   claude | codex | cursor
+Agents:   claude | claude-vertex | codex | cursor
 
 Options:
   -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
@@ -141,6 +146,22 @@ Installed via the [native installer](https://claude.ai/install.sh) (npm is depre
 - **API key**: set `ANTHROPIC_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
 - **OAuth (Pro/Max subscription)**: run `claude login` on the host first, then `~/.claude/` is automatically mounted into the container
 
+### Claude Code via Vertex AI
+
+Uses the same container image as Claude Code, but authenticates through Google Cloud (Vertex AI) instead of a direct Anthropic API key. Three variables must be set in `~/.config/ai-sandbox/env`:
+
+```
+CLAUDE_CODE_USE_VERTEX=1
+CLOUD_ML_REGION=global
+ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project-id>
+```
+
+Additionally, `~/.config/gcloud/` must exist on the host with valid credentials (run `gcloud auth application-default login` beforehand). The directory is mounted read-only into the container.
+
+If `~/.claude/` exists on the host, it is mounted into the container for settings persistence, but `~/.claude/.credentials.json` is always masked (replaced by an empty file) to prevent OAuth credentials from leaking into the container.
+
+Environment variables are passed via `--env-file` so they don't appear in the process command line.
+
 ### Codex
 
 Installed via `npm install -g @openai/codex`. Two authentication methods are supported:
@@ -167,6 +188,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 ```
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
+- **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. `~/.claude` is mounted if present, but `.credentials.json` is masked with `/dev/null` to avoid leaking OAuth tokens. All Vertex-specific variables are passed via `--env-file` (not visible in `ps`).
 - **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config. `~/.config/cursor/` is also bind-mounted read-write for auth and configuration persistence.
 
