@@ -325,16 +325,24 @@ if [[ "$AGENT" == "claude" ]]; then
     fi
 fi
 
-# === CLAUDE-VERTEX CONFIG: gcloud credentials + ~/.claude (without .credentials.json) ===
+# === CLAUDE-VERTEX CONFIG: gcloud credentials + isolated claude state ===
+# Uses dedicated paths under ~/.config/ai-sandbox/ so that vertex sessions
+# are fully separated from the personal ~/.claude/ and ~/.claude.json.
 if [[ "$AGENT" == "claude-vertex" ]]; then
     CMD+=(-v "${HOME}/.config/gcloud:/home/agent/.config/gcloud:ro,Z")
-    if [[ -d "${HOME}/.claude" ]]; then
-        CMD+=(-v "${HOME}/.claude:/home/agent/.claude:Z")
-        CMD+=(-v /dev/null:/home/agent/.claude/.credentials.json:ro)
+
+    VERTEX_CLAUDE_DIR="${HOME}/.config/ai-sandbox/claude-vertex"
+    VERTEX_CLAUDE_JSON="${HOME}/.config/ai-sandbox/claude-vertex.json"
+
+    if [[ ! -d "$VERTEX_CLAUDE_DIR" ]]; then
+        install -d "$VERTEX_CLAUDE_DIR"
     fi
-    if [[ -f "${HOME}/.claude.json" ]]; then
-        CMD+=(-v "${HOME}/.claude.json:/home/agent/.claude.json:Z")
+    if [[ ! -f "$VERTEX_CLAUDE_JSON" ]]; then
+        echo '{}' > "$VERTEX_CLAUDE_JSON"
     fi
+
+    CMD+=(-v "${VERTEX_CLAUDE_DIR}:/home/agent/.claude:Z")
+    CMD+=(-v "${VERTEX_CLAUDE_JSON}:/home/agent/.claude.json:Z")
 fi
 
 # === CURSOR CONFIG: mount entire .cursor directory rw ===

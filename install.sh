@@ -191,6 +191,18 @@ EOF
         chmod 600 "$env_file"
     fi
 
+    local vertex_dir="${sandbox_config}/claude-vertex"
+    if [[ ! -d "$vertex_dir" ]]; then
+        log "Creating ${vertex_dir}/"
+        install -d "$vertex_dir"
+    fi
+
+    local vertex_json="${sandbox_config}/claude-vertex.json"
+    if [[ ! -f "$vertex_json" ]]; then
+        log "Creating ${vertex_json}"
+        echo '{}' > "$vertex_json"
+    fi
+
     local cursor_config="${HOME}/.config/cursor"
     if [[ ! -d "$cursor_config" ]]; then
         log "Creating ${cursor_config}/"

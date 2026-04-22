@@ -158,7 +158,12 @@ ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project-id>
 
 Additionally, `~/.config/gcloud/` must exist on the host with valid credentials (run `gcloud auth application-default login` beforehand). The directory is mounted read-only into the container.
 
-If `~/.claude/` exists on the host, it is mounted into the container for settings persistence, but `~/.claude/.credentials.json` is always masked (replaced by an empty file) to prevent OAuth credentials from leaking into the container.
+Claude state is fully isolated from the personal `~/.claude/` and `~/.claude.json`:
+
+- **`~/.config/ai-sandbox/claude-vertex/`** is mounted as `~/.claude` inside the container (settings, projects, cache)
+- **`~/.config/ai-sandbox/claude-vertex.json`** is mounted as `~/.claude.json` (onboarding state)
+
+Both are created automatically by `install.sh` (or on first run). The onboarding is done only once — subsequent runs reuse the persisted state. The host's personal `~/.claude/` and `~/.claude.json` are never touched.
 
 Vertex variables can be defined in `~/.config/ai-sandbox/env` or exported in the shell — both work. They are passed to the container via `-e` from the current process environment.
 
@@ -188,7 +193,7 @@ Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python
 ```
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
-- **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. `~/.claude` is mounted if present, but `.credentials.json` is masked with `/dev/null` to avoid leaking OAuth tokens. Vertex variables work both from `~/.config/ai-sandbox/env` and from shell exports.
+- **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. Uses dedicated `~/.config/ai-sandbox/claude-vertex/` and `claude-vertex.json` instead of the host's `~/.claude/` and `~/.claude.json`, ensuring full isolation between personal and vertex sessions.
 - **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config. `~/.config/cursor/` is also bind-mounted read-write for auth and configuration persistence.
 
