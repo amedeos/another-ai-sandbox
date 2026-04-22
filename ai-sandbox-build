@@ -37,6 +37,8 @@ usage() {
     echo "  cursor  - Build base + Cursor Agent image"
     echo "  all     - Build base + all agent images (default)"
     echo ""
+    echo "Note: claude-vertex uses the claude image, no separate build needed."
+    echo ""
     echo "Data directory: ${DATA_DIR}"
     echo "Override with AI_SANDBOX_DATA_DIR env var."
     exit 0
