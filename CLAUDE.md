@@ -67,3 +67,4 @@ Do NOT create commits automatically. All commits must be reviewed and approved b
 - Container images are tagged `localhost/agent-{base,claude,codex,cursor}:latest`.
 - `claude-vertex` shares the `agent-claude` image; there is no separate build target.
 - The `agent` user (UID 1000) runs inside containers. `--userns=keep-id:uid=1000,gid=1000` maps host UID to container UID 1000.
+- When adding or removing packages in `base/Containerfile`, always update the package list in the **Base Image** section of `README.md` to match.

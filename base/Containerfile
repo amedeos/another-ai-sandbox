@@ -49,6 +49,7 @@ RUN dnf install -y \
         ShellCheck \
         ruff \
         python3-pytest \
+        poppler-utils \
     && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && dnf clean all \
     && rm -rf /var/cache/dnf
