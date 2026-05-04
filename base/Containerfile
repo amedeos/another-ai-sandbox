@@ -59,6 +59,7 @@ RUN dnf install -y \
         python3-pytest \
         poppler-utils \
         mupdf \
+        pandoc \
     && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && rm -f /usr/bin/mupdf /usr/bin/mupdf-gl /usr/bin/mupdf-x11 \
     && rpm -e --nodeps \
