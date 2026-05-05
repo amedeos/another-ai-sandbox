@@ -7,7 +7,7 @@ Rootless Podman containers to run AI coding agents (Claude Code, Claude Code via
 ```
 ai-sandbox/
 ├── base/
-│   └── Containerfile          # Base image (Fedora 43, Node.js, Python, Git, ripgrep, …)
+│   └── Containerfile          # Base image (Fedora 44, Node.js, Python, Git, ripgrep, …)
 ├── bpf/
 │   ├── block_commands.bpf.c   # BPF LSM program (hooks bprm_check_security)
 │   ├── block_commands.h       # Shared structures (blocked_cmd_key)
@@ -180,7 +180,7 @@ Installed via the official `cursor.com/install` script. The installation is copi
 
 ## Base Image
 
-Built on **Fedora 43** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
 
 The image is size-optimised: weak dependencies are skipped (`install_weak_deps=False`), documentation is excluded (`tsflags=nodocs`), mupdf's unused GUI dependencies (mesa, llvm-libs, X11) are removed after install, ELF binaries are stripped, and everything runs in a single layer.
 
