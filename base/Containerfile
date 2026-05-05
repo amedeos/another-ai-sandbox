@@ -2,7 +2,7 @@
 # Base image for AI agent sandboxing
 # Provides common tooling: Node.js, Python, Git, curl
 # =============================================================================
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:44
 
 LABEL maintainer="amedeo" \
       description="Base image for sandboxed AI coding agents"

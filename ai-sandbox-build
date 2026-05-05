@@ -16,7 +16,7 @@ set -euo pipefail
 
 BUILDER="podman"
 DATA_DIR="${AI_SANDBOX_DATA_DIR:-${HOME}/.local/share/ai-sandbox}"
-BASE_IMAGE="registry.fedoraproject.org/fedora:43"
+BASE_IMAGE="registry.fedoraproject.org/fedora:44"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
