@@ -7,16 +7,16 @@
 #   ai-sandbox claude-vertex [directory] [-- extra args]
 #   ai-sandbox codex         [directory] [-- extra args]
 #   ai-sandbox cursor        [directory] [-- extra args]
-#   ai-sandbox ollama-opencode [directory] [-- extra args]
-#   ai-sandbox --build [all|base|claude|codex|cursor|ollama-opencode]
+#   ai-sandbox opencode [directory] [-- extra args]
+#   ai-sandbox --build [all|base|claude|codex|cursor|opencode]
 #
 # Examples:
 #   ai-sandbox claude ~/projects/my-repo
 #   ai-sandbox claude-vertex ~/projects/my-repo
 #   ai-sandbox codex  .
 #   ai-sandbox cursor ~/projects/other -- chat "find bugs"
-#   ai-sandbox ollama-opencode ~/projects/my-repo
-#   ai-sandbox ollama-opencode . --model kimi-k2.6
+#   ai-sandbox opencode ~/projects/my-repo
+#   ai-sandbox opencode . --model kimi-k2.6
 #   ai-sandbox claude                       # uses current directory
 #   ai-sandbox --build claude               # rebuild claude image
 #   ai-sandbox --build                      # rebuild all images
@@ -25,7 +25,7 @@
 #   ANTHROPIC_API_KEY  - for Claude Code (direct API)
 #   OPENAI_API_KEY     - for Codex
 #   CURSOR_API_KEY     - for Cursor Agent
-#   OLLAMA_API_KEY     - for opencode against Ollama Cloud
+#   AI_SANDBOX_OPENCODE_API_KEY - for opencode (default endpoint: Ollama Cloud)
 #
 # For Claude via Vertex AI (claude-vertex), set in ~/.config/ai-sandbox/env:
 #   CLAUDE_CODE_USE_VERTEX=1
@@ -37,11 +37,11 @@
 #   ANTHROPIC_API_KEY=sk-ant-...
 #   OPENAI_API_KEY=sk-...
 #   CURSOR_API_KEY=...
-#   OLLAMA_API_KEY=...
+#   AI_SANDBOX_OPENCODE_API_KEY=...
 #
-# For ollama-opencode, the endpoint and model can also be set there:
-#   OLLAMA_BASE_URL=https://ollama.com/v1
-#   OLLAMA_MODEL=glm-5.2:cloud
+# For opencode, the endpoint and model can also be set there:
+#   AI_SANDBOX_OPENCODE_BASE_URL=https://ollama.com/v1
+#   AI_SANDBOX_OPENCODE_MODEL=glm-5.2:cloud
 # and overridden per run with --base-url / --model.
 # =============================================================================
 set -euo pipefail
@@ -56,8 +56,8 @@ TMPFS_HOME_SIZE="1g"
 NETWORK_MODE="pasta"           # "pasta" (fast, recommended) or "slirp4netns"
 DNS="${AI_SANDBOX_DNS:-1.1.1.1}"  # override with AI_SANDBOX_DNS env var or --dns flag
 ENV_FILE="${HOME}/.config/ai-sandbox/env"
-OLLAMA_BASE_URL_DEFAULT="https://ollama.com/v1"   # Ollama Cloud OpenAI-compatible endpoint
-OLLAMA_MODEL_DEFAULT="glm-5.2:cloud"
+OPENCODE_BASE_URL_DEFAULT="https://ollama.com/v1"   # any OpenAI-compatible endpoint; Ollama Cloud by default
+OPENCODE_MODEL_DEFAULT="glm-5.2:cloud"
 BLOCKED_COMMANDS=""    # Space-separated list of "binary:arg1" pairs, e.g. "git:push git:push --force"
 
 # --- Colors -------------------------------------------------------------------
@@ -84,11 +84,11 @@ usage() {
     echo "       ai-sandbox --build [target]"
     echo ""
     echo "Available agents:"
-    echo "  claude          - Claude Code (Anthropic, direct API key)"
-    echo "  claude-vertex   - Claude Code via Vertex AI (GCP auth)"
-    echo "  codex           - Codex CLI (OpenAI)"
-    echo "  cursor          - Cursor Agent CLI"
-    echo "  ollama-opencode - opencode CLI against Ollama Cloud (or a local Ollama)"
+    echo "  claude        - Claude Code (Anthropic, direct API key)"
+    echo "  claude-vertex - Claude Code via Vertex AI (GCP auth)"
+    echo "  codex         - Codex CLI (OpenAI)"
+    echo "  cursor        - Cursor Agent CLI"
+    echo "  opencode      - opencode CLI on any OpenAI-compatible endpoint"
     echo ""
     echo "Options:"
     echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
@@ -96,14 +96,14 @@ usage() {
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
-    echo "      --build [target]    Build container images (all|base|claude|codex|cursor|ollama-opencode)"
+    echo "      --build [target]    Build container images (all|base|claude|codex|cursor|opencode)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
     echo ""
-    echo "Options for ollama-opencode:"
-    echo "      --model <name>      Model to use (default: ${OLLAMA_MODEL_DEFAULT}, env: OLLAMA_MODEL)"
-    echo "      --base-url <url>    Ollama endpoint (default: ${OLLAMA_BASE_URL_DEFAULT}, env: OLLAMA_BASE_URL)"
-    echo "      --no-api-key        Do not require OLLAMA_API_KEY (for local endpoints)"
+    echo "Options for opencode:"
+    echo "      --model <name>      Model to use (default: ${OPENCODE_MODEL_DEFAULT}, env: AI_SANDBOX_OPENCODE_MODEL)"
+    echo "      --base-url <url>    API endpoint (default: ${OPENCODE_BASE_URL_DEFAULT}, env: AI_SANDBOX_OPENCODE_BASE_URL)"
+    echo "      --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)"
     exit 0
 }
 
@@ -204,28 +204,28 @@ case "$AGENT" in
         IMAGE="localhost/agent-cursor:latest"
         API_KEY_VAR="CURSOR_API_KEY"
         ;;
-    ollama-opencode)
-        IMAGE="localhost/agent-ollama-opencode:latest"
-        API_KEY_VAR="OLLAMA_API_KEY"
+    opencode)
+        IMAGE="localhost/agent-opencode:latest"
+        API_KEY_VAR="AI_SANDBOX_OPENCODE_API_KEY"
         ;;
     *)
         echo -e "${RED}Unknown agent: ${AGENT}${NC}" >&2
-        echo "Valid agents: claude, claude-vertex, codex, cursor, ollama-opencode"
+        echo "Valid agents: claude, claude-vertex, codex, cursor, opencode"
         exit 1
         ;;
 esac
 
-# These options only mean something for the opencode/Ollama image; fail loudly
+# These options only mean something for the opencode image; fail loudly
 # rather than accepting them and silently doing nothing.
-if [[ "$AGENT" != "ollama-opencode" ]]; then
+if [[ "$AGENT" != "opencode" ]]; then
     for opt in "--model:${OPT_MODEL}" "--base-url:${OPT_BASE_URL}"; do
         if [[ -n "${opt#*:}" ]]; then
-            echo -e "${RED}Error: ${opt%%:*} is only supported for the ollama-opencode agent.${NC}" >&2
+            echo -e "${RED}Error: ${opt%%:*} is only supported for the opencode agent.${NC}" >&2
             exit 1
         fi
     done
     if [[ "$OPT_NO_API_KEY" == true ]]; then
-        echo -e "${RED}Error: --no-api-key is only supported for the ollama-opencode agent.${NC}" >&2
+        echo -e "${RED}Error: --no-api-key is only supported for the opencode agent.${NC}" >&2
         exit 1
     fi
 fi
@@ -238,24 +238,24 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# --- Resolve ollama-opencode settings -----------------------------------------
+# --- Resolve opencode settings ------------------------------------------------
 # Precedence: CLI flag > env file > shell environment > built-in default.
 # The env file is sourced above with 'set -a', which overwrites variables already
 # exported in the shell, so the CLI overrides must be applied here — after it.
-if [[ "$AGENT" == "ollama-opencode" ]]; then
+if [[ "$AGENT" == "opencode" ]]; then
     if [[ -n "$OPT_MODEL" ]]; then
-        OLLAMA_MODEL="$OPT_MODEL"
+        AI_SANDBOX_OPENCODE_MODEL="$OPT_MODEL"
     fi
     if [[ -n "$OPT_BASE_URL" ]]; then
-        OLLAMA_BASE_URL="$OPT_BASE_URL"
+        AI_SANDBOX_OPENCODE_BASE_URL="$OPT_BASE_URL"
     fi
-    OLLAMA_MODEL="${OLLAMA_MODEL:-$OLLAMA_MODEL_DEFAULT}"
-    OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-$OLLAMA_BASE_URL_DEFAULT}"
-    export OLLAMA_MODEL OLLAMA_BASE_URL
+    AI_SANDBOX_OPENCODE_MODEL="${AI_SANDBOX_OPENCODE_MODEL:-$OPENCODE_MODEL_DEFAULT}"
+    AI_SANDBOX_OPENCODE_BASE_URL="${AI_SANDBOX_OPENCODE_BASE_URL:-$OPENCODE_BASE_URL_DEFAULT}"
+    export AI_SANDBOX_OPENCODE_MODEL AI_SANDBOX_OPENCODE_BASE_URL
 
     if [[ "$OPT_NO_API_KEY" == true ]]; then
-        OLLAMA_NO_API_KEY=1
-        export OLLAMA_NO_API_KEY
+        AI_SANDBOX_OPENCODE_NO_API_KEY=1
+        export AI_SANDBOX_OPENCODE_NO_API_KEY
         API_KEY_VAR=""   # skips the API key check below
     fi
 fi
@@ -300,8 +300,8 @@ elif [[ -n "$API_KEY_VAR" && -z "${!API_KEY_VAR:-}" ]]; then
             echo "Or run 'claude login' on the host first to create ~/.claude/"
         elif [[ "$AGENT" == "codex" ]]; then
             echo "Or run 'codex login' on the host first to create ~/.codex/"
-        elif [[ "$AGENT" == "ollama-opencode" ]]; then
-            echo "Get a key at https://ollama.com/settings/keys"
+        elif [[ "$AGENT" == "opencode" ]]; then
+            echo "For the default Ollama Cloud endpoint, get a key at https://ollama.com/settings/keys"
             echo "Or use --no-api-key if --base-url points to an endpoint that doesn't need one"
         fi
         echo ""
@@ -381,14 +381,14 @@ if [[ "$AGENT" == "claude-vertex" ]]; then
     # Pass Vertex vars explicitly so they work whether they come from
     # the env file, from the user's shell environment, or both.
     CMD+=(-e CLAUDE_CODE_USE_VERTEX -e CLOUD_ML_REGION -e ANTHROPIC_VERTEX_PROJECT_ID)
-elif [[ "$AGENT" == "ollama-opencode" ]]; then
+elif [[ "$AGENT" == "opencode" ]]; then
     # Endpoint and model are always passed; the key only when one is expected.
     # Names are passed without values so --verbose never prints the key.
-    CMD+=(-e OLLAMA_BASE_URL -e OLLAMA_MODEL)
+    CMD+=(-e AI_SANDBOX_OPENCODE_BASE_URL -e AI_SANDBOX_OPENCODE_MODEL)
     if [[ "$OPT_NO_API_KEY" == true ]]; then
-        CMD+=(-e OLLAMA_NO_API_KEY)
+        CMD+=(-e AI_SANDBOX_OPENCODE_NO_API_KEY)
     else
-        CMD+=(-e OLLAMA_API_KEY)
+        CMD+=(-e AI_SANDBOX_OPENCODE_API_KEY)
     fi
 else
     CMD+=(-e "${API_KEY_VAR}")
@@ -443,14 +443,14 @@ if [[ "$AGENT" == "codex" ]]; then
     fi
 fi
 
-# === OLLAMA-OPENCODE STATE: persist sessions and the provider package cache ===
+# === OPENCODE STATE: persist sessions and the provider package cache ===
 # /home/agent is a tmpfs, so without these the session history is lost on exit
 # and opencode re-downloads its provider package on every run.
 # Mounted on /state rather than directly under /home/agent: podman creates
 # missing mount point directories as container root, leaving them unwritable by
 # the agent user. The entrypoint symlinks them into place instead.
-if [[ "$AGENT" == "ollama-opencode" ]]; then
-    OPENCODE_STATE_DIR="${HOME}/.config/ai-sandbox/ollama-opencode"
+if [[ "$AGENT" == "opencode" ]]; then
+    OPENCODE_STATE_DIR="${HOME}/.config/ai-sandbox/opencode"
     install -d "${OPENCODE_STATE_DIR}"/{share,state,cache}
     CMD+=(-v "${OPENCODE_STATE_DIR}/share:/state/share:Z")
     CMD+=(-v "${OPENCODE_STATE_DIR}/state:/state/state:Z")
@@ -485,9 +485,9 @@ echo -e "  Container: ${CONTAINER_NAME}"
 echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
 echo -e "  Home size: ${TMPFS_HOME_SIZE}"
 echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
-if [[ "$AGENT" == "ollama-opencode" ]]; then
-    echo -e "  Endpoint:  ${OLLAMA_BASE_URL}"
-    echo -e "  Model:     ${OLLAMA_MODEL}"
+if [[ "$AGENT" == "opencode" ]]; then
+    echo -e "  Endpoint:  ${AI_SANDBOX_OPENCODE_BASE_URL}"
+    echo -e "  Model:     ${AI_SANDBOX_OPENCODE_MODEL}"
 fi
 if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     echo -e "  Blocked:  ${BLOCK_CMDS[*]}"

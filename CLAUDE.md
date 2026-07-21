@@ -14,16 +14,16 @@ podman build --format docker --tag localhost/agent-base:latest --file base/Conta
 podman build --format docker --tag localhost/agent-claude:latest --file claude-code/Containerfile claude-code/
 podman build --format docker --tag localhost/agent-codex:latest --file codex/Containerfile codex/
 podman build --format docker --tag localhost/agent-cursor:latest --file cursor-agent/Containerfile cursor-agent/
-podman build --format docker --tag localhost/agent-ollama-opencode:latest --file ollama-opencode/Containerfile ollama-opencode/
+podman build --format docker --tag localhost/agent-opencode:latest --file opencode/Containerfile opencode/
 ```
 
 **Lint:**
 ```bash
 # Shell scripts (CI uses ShellCheck)
-shellcheck ai-sandbox ai-sandbox-build install.sh claude-code/entrypoint.sh codex/entrypoint.sh ollama-opencode/entrypoint.sh test/test_bpf_blocker.sh
+shellcheck ai-sandbox ai-sandbox-build install.sh claude-code/entrypoint.sh codex/entrypoint.sh opencode/entrypoint.sh test/test_bpf_blocker.sh
 
 # Containerfiles (CI uses Hadolint)
-hadolint base/Containerfile claude-code/Containerfile codex/Containerfile cursor-agent/Containerfile ollama-opencode/Containerfile
+hadolint base/Containerfile claude-code/Containerfile codex/Containerfile cursor-agent/Containerfile opencode/Containerfile
 ```
 
 **BPF loader (optional, requires clang, bpftool, libbpf, BTF kernel):**
@@ -49,7 +49,7 @@ There are three main scripts (all Bash) and a BPF subsystem:
 
 - **`bpf/`** — eBPF LSM command blocker. `block_commands.bpf.c` hooks `bprm_check_security` (binary-only rules, blocks before exec) and uses a tracepoint (binary+arg rules, kills after exec). `loader.c` is the userspace loader using libbpf skeletons. Blocking is scoped to a container's cgroup v2.
 
-**Container image hierarchy:** `base/Containerfile` (Fedora 44 + tooling) → agent-specific Containerfiles (`claude-code/`, `codex/`, `cursor-agent/`, `ollama-opencode/`) each `FROM localhost/agent-base:latest`. Agent installs are moved to `/opt` at build time so they survive the tmpfs on `/home/agent` at runtime.
+**Container image hierarchy:** `base/Containerfile` (Fedora 44 + tooling) → agent-specific Containerfiles (`claude-code/`, `codex/`, `cursor-agent/`, `opencode/`) each `FROM localhost/agent-base:latest`. Agent installs are moved to `/opt` at build time so they survive the tmpfs on `/home/agent` at runtime.
 
 ## CI
 

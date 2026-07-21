@@ -1,6 +1,6 @@
 # AI Agent Sandbox
 
-Rootless Podman containers to run AI coding agents (Claude Code, Claude Code via Vertex AI, Codex, Cursor Agent, opencode against Ollama) in isolation. Each agent runs in a hardened, read-only container with minimal capabilities, resource limits and an isolated network stack.
+Rootless Podman containers to run AI coding agents (Claude Code, Claude Code via Vertex AI, Codex, Cursor Agent, opencode) in isolation. Each agent runs in a hardened, read-only container with minimal capabilities, resource limits and an isolated network stack.
 
 ## Structure
 
@@ -21,9 +21,9 @@ ai-sandbox/
 │   └── Containerfile          # OpenAI Codex CLI
 ├── cursor-agent/
 │   └── Containerfile          # Cursor Agent CLI (installed to /opt to survive tmpfs)
-├── ollama-opencode/
-│   ├── Containerfile          # opencode CLI, pointed at an Ollama endpoint
-│   └── entrypoint.sh          # Generates opencode.json from the OLLAMA_* variables
+├── opencode/
+│   ├── Containerfile          # opencode CLI (any OpenAI-compatible endpoint)
+│   └── entrypoint.sh          # Generates opencode.json from AI_SANDBOX_OPENCODE_*
 ├── test/
 │   └── test_bpf_blocker.sh   # End-to-end tests for BPF command blocker
 ├── install.sh                 # Installer (and uninstaller) script
@@ -54,7 +54,7 @@ vi ~/.config/ai-sandbox/env
 #   ANTHROPIC_API_KEY=sk-ant-...
 #   OPENAI_API_KEY=sk-...
 #   CURSOR_API_KEY=...
-#   OLLAMA_API_KEY=...
+#   AI_SANDBOX_OPENCODE_API_KEY=...
 #
 # For Claude via Vertex AI, also set:
 #   CLAUDE_CODE_USE_VERTEX=1
@@ -66,7 +66,7 @@ ai-sandbox claude ~/projects/my-repo
 ai-sandbox claude-vertex ~/projects/my-repo   # via Vertex AI + GCP credentials
 ai-sandbox codex  .
 ai-sandbox cursor ~/projects/other -- chat "find bugs"
-ai-sandbox ollama-opencode ~/projects/my-repo # opencode on Ollama Cloud
+ai-sandbox opencode ~/projects/my-repo        # opencode, Ollama Cloud by default
 ai-sandbox claude                              # uses current directory
 ```
 
@@ -114,23 +114,23 @@ Every container is launched with the following hardening measures:
 
 ```
 ai-sandbox <agent> [directory] [-- extra args for the agent]
-ai-sandbox --build [all|base|claude|codex|cursor|ollama-opencode]
+ai-sandbox --build [all|base|claude|codex|cursor|opencode]
 
-Agents:   claude | claude-vertex | codex | cursor | ollama-opencode
+Agents:   claude | claude-vertex | codex | cursor | opencode
 
 Options:
   -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
       --home-size <size>   Size of /home/agent tmpfs (default: 1g, units: b, k, m, g)
-      --build [target]     Build container images (all|base|claude|codex|cursor|ollama-opencode)
+      --build [target]     Build container images (all|base|claude|codex|cursor|opencode)
   -v, --verbose           Show the podman command being run
   -h, --help              Show help
 
-Options for ollama-opencode:
-      --model <name>      Model to use (default: glm-5.2:cloud, env: OLLAMA_MODEL)
-      --base-url <url>    Ollama endpoint (default: https://ollama.com/v1, env: OLLAMA_BASE_URL)
-      --no-api-key        Do not require OLLAMA_API_KEY (for local endpoints)
+Options for opencode:
+      --model <name>      Model to use (default: glm-5.2:cloud, env: AI_SANDBOX_OPENCODE_MODEL)
+      --base-url <url>    API endpoint (default: https://ollama.com/v1, env: AI_SANDBOX_OPENCODE_BASE_URL)
+      --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)
 ```
 
 ## Customization
@@ -188,30 +188,37 @@ Installed via `npm install -g @openai/codex`. Two authentication methods are sup
 
 Installed via the official `cursor.com/install` script. The installation is copied to `/opt/cursor-agent` at build time so that it survives the tmpfs mount on `/home/agent` at runtime. Authenticates through `CURSOR_API_KEY` or via `~/.config/cursor/` (bind-mounted read-write into the container). The `~/.config/cursor/` directory is created automatically by `install.sh` if it doesn't exist.
 
-### opencode on Ollama
+### opencode
 
-Installed via `npm install -g opencode-ai`. The [opencode](https://opencode.ai) CLI speaks the OpenAI-compatible API, so it talks to Ollama through the `@ai-sdk/openai-compatible` provider. It defaults to **Ollama Cloud**, which needs no changes to the container's network stack — only outbound HTTPS, which `pasta` already provides.
+Installed via `npm install -g opencode-ai`. The [opencode](https://opencode.ai) CLI is provider-agnostic: the entrypoint configures it with the `@ai-sdk/openai-compatible` provider, so it works against **any endpoint that speaks OpenAI-compatible `/v1/chat/completions`** — Ollama Cloud, Groq, Together, OpenRouter, vLLM, llama.cpp, LM Studio, and so on.
+
+The default is **Ollama Cloud**, which needs no changes to the container's network stack: only outbound HTTPS, which `pasta` already provides.
 
 Three settings control it, each configurable in `~/.config/ai-sandbox/env`, in the shell environment, or per run on the command line:
 
-| Setting  | Env var           | Flag           | Default                   |
-| -------- | ----------------- | -------------- | ------------------------- |
-| API key  | `OLLAMA_API_KEY`  | `--no-api-key` | *(required)*              |
-| Model    | `OLLAMA_MODEL`    | `--model`      | `glm-5.2:cloud`           |
-| Endpoint | `OLLAMA_BASE_URL` | `--base-url`   | `https://ollama.com/v1`   |
+| Setting  | Env var                        | Flag           | Default                 |
+| -------- | ------------------------------ | -------------- | ----------------------- |
+| API key  | `AI_SANDBOX_OPENCODE_API_KEY`  | `--no-api-key` | *(required)*            |
+| Model    | `AI_SANDBOX_OPENCODE_MODEL`    | `--model`      | `glm-5.2:cloud`         |
+| Endpoint | `AI_SANDBOX_OPENCODE_BASE_URL` | `--base-url`   | `https://ollama.com/v1` |
+
+These are read by ai-sandbox's own entrypoint, not by opencode, hence the `AI_SANDBOX_` prefix used elsewhere in the project. The `OPENCODE_*` namespace is deliberately avoided: it belongs to opencode itself (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, …).
 
 Precedence is **CLI flag > env file > shell environment > built-in default**. (The env file is sourced with `set -a`, so it overrides variables already exported in the shell; the CLI flags are applied afterwards and always win.)
 
 ```bash
-ai-sandbox ollama-opencode ~/projects/my-repo
-ai-sandbox ollama-opencode . --model kimi-k2.6
+ai-sandbox opencode ~/projects/my-repo
+ai-sandbox opencode . --model kimi-k2.6
+ai-sandbox opencode . --base-url https://api.groq.com/openai/v1 --model llama-3.3-70b-versatile
 ```
 
-Get an API key at [ollama.com/settings/keys](https://ollama.com/settings/keys). Note that model names differ between the two access paths: the direct cloud API used here takes the model as published in the library (e.g. `glm-5.2:cloud`), while going through a local Ollama daemon acting as a cloud proxy uses different tag conventions.
+For the default endpoint, get an API key at [ollama.com/settings/keys](https://ollama.com/settings/keys). Model names there follow the library tags (e.g. `glm-5.2:cloud`); going through a local Ollama daemon acting as a cloud proxy uses different tag conventions.
 
-Session history and the downloaded provider package are persisted on the host under `~/.config/ai-sandbox/ollama-opencode/` (`share/`, `state/` and `cache/`), because `/home/agent` is a tmpfs and would otherwise be wiped on exit. These are bind-mounted on `/state` and symlinked into `~/.local/share`, `~/.local/state` and `~/.cache` by the entrypoint: mounting them directly under `/home/agent` would make podman create the parent directories as container root, leaving them unwritable by the `agent` user.
+Two limits worth knowing: `@ai-sdk/openai-compatible` covers `/v1/chat/completions`, so a provider exposing only `/v1/responses` would need the `@ai-sdk/openai` package instead; and authentication is sent as a `Bearer` token, so endpoints wanting a different header (Azure OpenAI's `api-key`, for instance) are not supported as-is.
 
-**Pointing at a local Ollama:** `--base-url` accepts any endpoint, but `http://localhost:11434/v1` will *not* work — inside the container `localhost` is the container itself, not the host. Reaching an Ollama daemon running on the host additionally requires host gateway plumbing (and binding Ollama to something other than `127.0.0.1`, which exposes it beyond the sandbox). That is deliberately out of scope here; `--base-url` and `--no-api-key` are usable today for remote or proxied endpoints that do not need a key.
+Session history and the downloaded provider package are persisted on the host under `~/.config/ai-sandbox/opencode/` (`share/`, `state/` and `cache/`), because `/home/agent` is a tmpfs and would otherwise be wiped on exit. These are bind-mounted on `/state` and symlinked into `~/.local/share`, `~/.local/state` and `~/.cache` by the entrypoint: mounting them directly under `/home/agent` would make podman create the parent directories as container root, leaving them unwritable by the `agent` user.
+
+**Pointing at a service on the host:** `--base-url` accepts any endpoint, but `http://localhost:11434/v1` will *not* work — inside the container `localhost` is the container itself, not the host. Reaching a daemon running on the host additionally requires host gateway plumbing (and binding that daemon to something other than `127.0.0.1`, which exposes it beyond the sandbox). That is deliberately out of scope here; `--base-url` and `--no-api-key` are usable today for remote or proxied endpoints.
 
 ## Base Image
 

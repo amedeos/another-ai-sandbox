@@ -1,8 +1,9 @@
 # =============================================================================
-# opencode CLI pointed at an Ollama endpoint - sandboxed container
-# Defaults to Ollama Cloud (https://ollama.com/v1); override the endpoint with
-# --base-url / OLLAMA_BASE_URL to target a local or alternative Ollama server.
-# Auth: OLLAMA_API_KEY env var (not needed for local endpoints, --no-api-key)
+# opencode CLI - sandboxed container
+# Talks to any OpenAI-compatible /v1/chat/completions endpoint; defaults to
+# Ollama Cloud. Override with --base-url / AI_SANDBOX_OPENCODE_BASE_URL.
+# Auth: AI_SANDBOX_OPENCODE_API_KEY env var (endpoints that ignore the key can
+# be used with --no-api-key)
 # =============================================================================
 FROM localhost/agent-base:latest
 

@@ -51,13 +51,13 @@ jobs:
             --file cursor-agent/Containerfile \
             cursor-agent/
 
-      - name: Build ollama-opencode image
+      - name: Build opencode image
         run: |
           podman build \
             --format docker \
-            --tag localhost/agent-ollama-opencode:latest \
-            --file ollama-opencode/Containerfile \
-            ollama-opencode/
+            --tag localhost/agent-opencode:latest \
+            --file opencode/Containerfile \
+            opencode/
 
       - name: Smoke test – claude
         run: podman run --rm localhost/agent-claude:latest --version
@@ -68,8 +68,8 @@ jobs:
       - name: Smoke test – cursor-agent
         run: podman run --rm localhost/agent-cursor:latest --version
 
-      - name: Smoke test – ollama-opencode
-        run: podman run --rm localhost/agent-ollama-opencode:latest --version
+      - name: Smoke test – opencode
+        run: podman run --rm localhost/agent-opencode:latest --version
 
       - name: List built images
         run: podman images | grep -E 'agent-'

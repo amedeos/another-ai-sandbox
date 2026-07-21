@@ -1,6 +1,6 @@
 #!/bin/bash
 # Prepare home directories on tmpfs, then generate the opencode provider config
-# from the OLLAMA_* variables before starting opencode.
+# from the AI_SANDBOX_OPENCODE_* variables before starting opencode.
 set -euo pipefail
 
 # Created here, as the agent user, so they are writable; then the persistent
@@ -12,18 +12,21 @@ ln -sfn /state/share ~/.local/share/opencode
 ln -sfn /state/state ~/.local/state/opencode
 ln -sfn /state/cache ~/.cache/opencode
 
-BASE_URL="${OLLAMA_BASE_URL:-https://ollama.com/v1}"
-MODEL="${OLLAMA_MODEL:-glm-5.2:cloud}"
+BASE_URL="${AI_SANDBOX_OPENCODE_BASE_URL:-https://ollama.com/v1}"
+MODEL="${AI_SANDBOX_OPENCODE_MODEL:-glm-5.2:cloud}"
 
-# Local Ollama endpoints ignore the key, but the OpenAI-compatible client still
-# expects a non-empty value, so send a placeholder instead of omitting it.
-if [[ "${OLLAMA_NO_API_KEY:-}" == "1" ]]; then
+# Some endpoints (a local Ollama, llama.cpp, …) ignore the key, but the
+# OpenAI-compatible client still expects a non-empty value, so send a
+# placeholder instead of omitting it.
+if [[ "${AI_SANDBOX_OPENCODE_NO_API_KEY:-}" == "1" ]]; then
     API_KEY="local"
 else
-    API_KEY="${OLLAMA_API_KEY:-}"
+    API_KEY="${AI_SANDBOX_OPENCODE_API_KEY:-}"
 fi
 
 # Generated with jq so model names and URLs are escaped correctly.
+# @ai-sdk/openai-compatible covers /v1/chat/completions endpoints; a provider
+# exposing only /v1/responses would need @ai-sdk/openai instead.
 jq -n \
     --arg baseURL "$BASE_URL" \
     --arg apiKey "$API_KEY" \
@@ -31,14 +34,14 @@ jq -n \
     '{
         "$schema": "https://opencode.ai/config.json",
         provider: {
-            ollama: {
+            custom: {
                 npm: "@ai-sdk/openai-compatible",
-                name: "Ollama",
+                name: "Custom (OpenAI-compatible)",
                 options: { baseURL: $baseURL, apiKey: $apiKey },
                 models: { ($model): { name: $model } }
             }
         },
-        model: ("ollama/" + $model)
+        model: ("custom/" + $model)
     }' > ~/.config/opencode/opencode.json
 
 exec opencode "$@"
