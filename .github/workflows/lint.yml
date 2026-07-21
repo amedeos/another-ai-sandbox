@@ -52,3 +52,8 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: cursor-agent/Containerfile
+
+      - name: Lint opencode/Containerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: opencode/Containerfile

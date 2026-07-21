@@ -11,6 +11,7 @@
 #   ai-sandbox-build claude       # only claude-code (requires base)
 #   ai-sandbox-build codex        # only codex (requires base)
 #   ai-sandbox-build cursor       # only cursor-agent (requires base)
+#   ai-sandbox-build opencode     # only opencode (requires base)
 # =============================================================================
 set -euo pipefail
 
@@ -28,14 +29,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 usage() {
-    echo "Usage: ai-sandbox-build [base|claude|codex|cursor|all]"
+    echo "Usage: ai-sandbox-build [base|claude|codex|cursor|opencode|all]"
     echo ""
     echo "Targets:"
-    echo "  base    - Build the base image only"
-    echo "  claude  - Build base + Claude Code image"
-    echo "  codex   - Build base + Codex image"
-    echo "  cursor  - Build base + Cursor Agent image"
-    echo "  all     - Build base + all agent images (default)"
+    echo "  base     - Build the base image only"
+    echo "  claude   - Build base + Claude Code image"
+    echo "  codex    - Build base + Codex image"
+    echo "  cursor   - Build base + Cursor Agent image"
+    echo "  opencode - Build base + opencode image"
+    echo "  all      - Build base + all agent images (default)"
     echo ""
     echo "Note: claude-vertex uses the claude image, no separate build needed."
     echo ""
@@ -95,6 +97,10 @@ build_cursor() {
     build_image "cursor-agent" "${DATA_DIR}/cursor-agent" "localhost/agent-cursor:latest"
 }
 
+build_opencode() {
+    build_image "opencode" "${DATA_DIR}/opencode" "localhost/agent-opencode:latest"
+}
+
 TARGET="${1:-all}"
 
 case "${TARGET}" in
@@ -113,18 +119,23 @@ case "${TARGET}" in
         build_base
         build_cursor
         ;;
+    opencode)
+        build_base
+        build_opencode
+        ;;
     all)
         build_base
         log "--- Base ready, building agents ---"
         build_claude
         build_codex
         build_cursor
+        build_opencode
         log "=== All images built ==="
-        "${BUILDER}" images | grep -E 'agent-(base|claude|codex|cursor)'
+        "${BUILDER}" images | grep -E 'agent-(base|claude|codex|cursor|opencode)'
         ;;
     *)
         err "Unknown target: ${TARGET}"
-        echo "Usage: ai-sandbox-build [base|claude|codex|cursor|all]"
+        echo "Usage: ai-sandbox-build [base|claude|codex|cursor|opencode|all]"
         exit 1
         ;;
 esac

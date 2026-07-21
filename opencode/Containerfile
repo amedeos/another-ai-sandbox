@@ -1,0 +1,26 @@
+# =============================================================================
+# opencode CLI - sandboxed container
+# Talks to any OpenAI-compatible /v1/chat/completions endpoint; defaults to
+# Ollama Cloud. Override with --base-url / AI_SANDBOX_OPENCODE_BASE_URL.
+# Auth: AI_SANDBOX_OPENCODE_API_KEY env var (endpoints that ignore the key can
+# be used with --no-api-key)
+# =============================================================================
+FROM localhost/agent-base:latest
+
+USER root
+RUN npm install -g opencode-ai
+
+# Mount point for persistent state, kept outside /home/agent: podman creates
+# missing mount point directories as container root, which the agent user
+# cannot then write into (/home/agent is a tmpfs). The entrypoint symlinks
+# the opencode directories here instead.
+RUN mkdir -p /state/share /state/state /state/cache \
+    && chown -R agent:agent /state
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+USER agent
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
