@@ -149,7 +149,7 @@ install_build_data() {
     log "Installing build data to ${DATA_DIR}/"
     install -d "${DATA_DIR}"
 
-    for component in base claude-code codex cursor-agent; do
+    for component in base claude-code codex cursor-agent ollama-opencode; do
         local src="${SCRIPT_DIR}/${component}"
         local dst="${DATA_DIR}/${component}"
         if [[ ! -d "$src" ]]; then
@@ -187,6 +187,11 @@ ensure_host_dirs() {
 # CLAUDE_CODE_USE_VERTEX=1
 # CLOUD_ML_REGION=global
 # ANTHROPIC_VERTEX_PROJECT_ID=GCP_PROJECT_ID
+#
+# opencode against Ollama (key from https://ollama.com/settings/keys)
+# OLLAMA_API_KEY=...
+# OLLAMA_MODEL=glm-5.2:cloud
+# OLLAMA_BASE_URL=https://ollama.com/v1
 EOF
         chmod 600 "$env_file"
     fi
@@ -419,7 +424,7 @@ do_uninstall() {
     # 3. Container images
     if command -v podman >/dev/null 2>&1; then
         local images=()
-        for img in agent-base agent-claude agent-codex agent-cursor; do
+        for img in agent-base agent-claude agent-codex agent-cursor agent-ollama-opencode; do
             if podman image exists "localhost/${img}:latest" 2>/dev/null; then
                 images+=("localhost/${img}:latest")
             fi

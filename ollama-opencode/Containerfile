@@ -1,0 +1,18 @@
+# =============================================================================
+# opencode CLI pointed at an Ollama endpoint - sandboxed container
+# Defaults to Ollama Cloud (https://ollama.com/v1); override the endpoint with
+# --base-url / OLLAMA_BASE_URL to target a local or alternative Ollama server.
+# Auth: OLLAMA_API_KEY env var (not needed for local endpoints, --no-api-key)
+# =============================================================================
+FROM localhost/agent-base:latest
+
+USER root
+RUN npm install -g opencode-ai
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+USER agent
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
