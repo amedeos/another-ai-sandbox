@@ -9,6 +9,13 @@ FROM localhost/agent-base:latest
 USER root
 RUN npm install -g opencode-ai
 
+# Mount point for persistent state, kept outside /home/agent: podman creates
+# missing mount point directories as container root, which the agent user
+# cannot then write into (/home/agent is a tmpfs). The entrypoint symlinks
+# the opencode directories here instead.
+RUN mkdir -p /state/share /state/state /state/cache \
+    && chown -R agent:agent /state
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh
 

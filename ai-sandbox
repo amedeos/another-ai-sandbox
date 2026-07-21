@@ -446,12 +446,15 @@ fi
 # === OLLAMA-OPENCODE STATE: persist sessions and the provider package cache ===
 # /home/agent is a tmpfs, so without these the session history is lost on exit
 # and opencode re-downloads its provider package on every run.
+# Mounted on /state rather than directly under /home/agent: podman creates
+# missing mount point directories as container root, leaving them unwritable by
+# the agent user. The entrypoint symlinks them into place instead.
 if [[ "$AGENT" == "ollama-opencode" ]]; then
-    OPENCODE_SHARE="${HOME}/.config/ai-sandbox/ollama-opencode/share"
-    OPENCODE_CACHE="${HOME}/.config/ai-sandbox/ollama-opencode/cache"
-    install -d "$OPENCODE_SHARE" "$OPENCODE_CACHE"
-    CMD+=(-v "${OPENCODE_SHARE}:/home/agent/.local/share/opencode:Z")
-    CMD+=(-v "${OPENCODE_CACHE}:/home/agent/.cache/opencode:Z")
+    OPENCODE_STATE_DIR="${HOME}/.config/ai-sandbox/ollama-opencode"
+    install -d "${OPENCODE_STATE_DIR}"/{share,state,cache}
+    CMD+=(-v "${OPENCODE_STATE_DIR}/share:/state/share:Z")
+    CMD+=(-v "${OPENCODE_STATE_DIR}/state:/state/state:Z")
+    CMD+=(-v "${OPENCODE_STATE_DIR}/cache:/state/cache:Z")
 fi
 
 # === GIT: pass user.name and user.email for commits ===

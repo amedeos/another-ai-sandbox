@@ -3,7 +3,14 @@
 # from the OLLAMA_* variables before starting opencode.
 set -euo pipefail
 
-mkdir -p ~/.cache ~/.config/opencode ~/.local/share
+# Created here, as the agent user, so they are writable; then the persistent
+# state bind-mounted on /state is linked in. Doing it the other way round —
+# bind-mounting straight into /home/agent — leaves the parent directories owned
+# by container root and opencode fails with EACCES.
+mkdir -p ~/.cache ~/.config/opencode ~/.local/share ~/.local/state
+ln -sfn /state/share ~/.local/share/opencode
+ln -sfn /state/state ~/.local/state/opencode
+ln -sfn /state/cache ~/.cache/opencode
 
 BASE_URL="${OLLAMA_BASE_URL:-https://ollama.com/v1}"
 MODEL="${OLLAMA_MODEL:-glm-5.2:cloud}"

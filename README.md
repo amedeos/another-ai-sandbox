@@ -209,7 +209,7 @@ ai-sandbox ollama-opencode . --model kimi-k2.6
 
 Get an API key at [ollama.com/settings/keys](https://ollama.com/settings/keys). Note that model names differ between the two access paths: the direct cloud API used here takes the model as published in the library (e.g. `glm-5.2:cloud`), while going through a local Ollama daemon acting as a cloud proxy uses different tag conventions.
 
-Session history and the downloaded provider package are persisted on the host under `~/.config/ai-sandbox/ollama-opencode/` (`share/` and `cache/`), because `/home/agent` is a tmpfs and would otherwise be wiped on exit.
+Session history and the downloaded provider package are persisted on the host under `~/.config/ai-sandbox/ollama-opencode/` (`share/`, `state/` and `cache/`), because `/home/agent` is a tmpfs and would otherwise be wiped on exit. These are bind-mounted on `/state` and symlinked into `~/.local/share`, `~/.local/state` and `~/.cache` by the entrypoint: mounting them directly under `/home/agent` would make podman create the parent directories as container root, leaving them unwritable by the `agent` user.
 
 **Pointing at a local Ollama:** `--base-url` accepts any endpoint, but `http://localhost:11434/v1` will *not* work — inside the container `localhost` is the container itself, not the host. Reaching an Ollama daemon running on the host additionally requires host gateway plumbing (and binding Ollama to something other than `127.0.0.1`, which exposes it beyond the sandbox). That is deliberately out of scope here; `--base-url` and `--no-api-key` are usable today for remote or proxied endpoints that do not need a key.
 
