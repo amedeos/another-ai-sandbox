@@ -103,7 +103,7 @@ Every container is launched with the following hardening measures:
 | `--no-new-privileges`         | Prevents privilege escalation (setuid, etc.)               |
 | `--read-only`                 | Container filesystem is read-only                          |
 | `--pids-limit=512`            | Prevents fork bombs                                        |
-| `--cpus=2 --memory=4g`        | Limits CPU and RAM resources via cgroups v2                |
+| `--cpus` / `--memory`         | Limits CPU and RAM via cgroups v2 (default 2 CPU / 4g, see [Resource Limits](#resource-limits)) |
 | `--network=pasta`             | Kernel-backed isolated network (fast, uses user namespaces)|
 | `--tmpfs /tmp`                | Temporary writable area, destroyed at session end          |
 | `--mount type=tmpfs,dst=/home/agent` | Agent home on tmpfs (mode 0755), destroyed at session end |
@@ -122,6 +122,8 @@ Options:
   -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
+      --cpus <n>           CPU limit (default: 2, env: AI_SANDBOX_CPUS)
+      --memory <size>      RAM limit (default: 4g, env: AI_SANDBOX_MEMORY)
       --home-size <size>   Size of /home/agent tmpfs (default: 1g, units: b, k, m, g)
       --build [target]     Build container images (all|base|claude|codex|cursor|opencode)
   -v, --verbose           Show the podman command being run
@@ -133,13 +135,37 @@ Options for opencode:
       --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)
 ```
 
+## Resource Limits
+
+CPU and RAM can be raised per run:
+
+```bash
+ai-sandbox claude --cpus 12 --memory 24g
+```
+
+Or persistently, in `~/.config/ai-sandbox/env`:
+
+```bash
+AI_SANDBOX_CPUS=12
+AI_SANDBOX_MEMORY=24g
+```
+
+Precedence is: command-line flag > `~/.config/ai-sandbox/env` (or shell environment) > built-in
+default (2 CPU, 4g).
+
+The memory limit is always enforced. The CPU limit requires CFS bandwidth control in the kernel
+(`CONFIG_CFS_BANDWIDTH=y`, which provides `cpu.max`) and, for rootless podman, the `cpu` controller
+delegated to your user cgroup. When either is missing, `ai-sandbox` skips `--cpus` instead of
+failing to start: the startup banner then reports `CPU unlimited (no cgroup quota)`, and an
+explicit `--cpus` prints a warning.
+
 ## Customization
 
 Edit the variables at the top of the `ai-sandbox` script:
 
 ```bash
-MAX_CPUS="2"           # Number of CPUs
-MAX_MEM="4g"           # RAM limit
+MAX_CPUS_DEFAULT="2"   # Number of CPUs (override with --cpus / AI_SANDBOX_CPUS)
+MAX_MEM_DEFAULT="4g"   # RAM limit (override with --memory / AI_SANDBOX_MEMORY)
 MAX_PIDS="512"         # Process limit
 TMPFS_TMP_SIZE="1g"    # /tmp size
 TMPFS_HOME_SIZE="1g"   # /home/agent size (units: b, k, m, g)

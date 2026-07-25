@@ -39,6 +39,11 @@
 #   CURSOR_API_KEY=...
 #   AI_SANDBOX_OPENCODE_API_KEY=...
 #
+# Resource limits can be set there as well:
+#   AI_SANDBOX_CPUS=12
+#   AI_SANDBOX_MEMORY=24g
+# and overridden per run with --cpus / --memory.
+#
 # For opencode, the endpoint and model can also be set there:
 #   AI_SANDBOX_OPENCODE_BASE_URL=https://ollama.com/v1
 #   AI_SANDBOX_OPENCODE_MODEL=glm-5.2:cloud
@@ -48,8 +53,8 @@ set -euo pipefail
 
 # --- Configuration ------------------------------------------------------------
 BUILDER="podman"
-MAX_CPUS="2"
-MAX_MEM="4g"
+MAX_CPUS_DEFAULT="2"           # override with --cpus or AI_SANDBOX_CPUS
+MAX_MEM_DEFAULT="4g"           # override with --memory or AI_SANDBOX_MEMORY
 MAX_PIDS="512"
 TMPFS_TMP_SIZE="1g"
 TMPFS_HOME_SIZE="1g"
@@ -77,6 +82,28 @@ validate_size() {
     fi
 }
 
+validate_cpus() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [[ "$value" =~ ^0+(\.0+)?$ ]]; then
+        echo -e "${RED}Error: invalid CPU count '${value}'.${NC}" >&2
+        echo "Use a positive number, e.g. 2, 4, 12, or a fraction like 1.5" >&2
+        exit 1
+    fi
+}
+
+# podman's --cpus needs CFS bandwidth control (CONFIG_CFS_BANDWIDTH=y), which is what
+# creates cpu.max in a cgroup v2 hierarchy. Rootless additionally needs the 'cpu'
+# controller delegated to the user's cgroup, otherwise crun fails to apply the limit.
+cpu_quota_supported() {
+    local rel base
+    rel="$(awk -F: '$1 == "0" { print $3; exit }' /proc/self/cgroup 2>/dev/null)"
+    [[ -n "$rel" ]] || return 1
+    base="/sys/fs/cgroup${rel}"
+    [[ -f "${base}/cpu.max" ]] || return 1
+    grep -qw cpu "${base}/cgroup.controllers" 2>/dev/null || \
+        grep -qw cpu "$(dirname "${base}")/cgroup.controllers" 2>/dev/null
+}
+
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
@@ -94,6 +121,8 @@ usage() {
     echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
     echo "  -n, --network-off       Disable network (no API, local only)"
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
+    echo "      --cpus <n>          CPU limit (default: ${MAX_CPUS_DEFAULT}, env: AI_SANDBOX_CPUS)"
+    echo "      --memory <size>     RAM limit (default: ${MAX_MEM_DEFAULT}, env: AI_SANDBOX_MEMORY)"
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
     echo "      --build [target]    Build container images (all|base|claude|codex|cursor|opencode)"
@@ -117,6 +146,8 @@ BLOCK_CMDS=()
 OPT_MODEL=""
 OPT_BASE_URL=""
 OPT_NO_API_KEY=false
+OPT_CPUS=""
+OPT_MEMORY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -137,6 +168,8 @@ while [[ $# -gt 0 ]]; do
         --home-size)  TMPFS_HOME_SIZE="$2"; shift 2 ;;
         # Kept in OPT_* until after the env file is sourced, otherwise
         # 'source' would silently overwrite them (see the resolution block below).
+        --cpus)       OPT_CPUS="$2"; shift 2 ;;
+        --memory)     OPT_MEMORY="$2"; shift 2 ;;
         --model)      OPT_MODEL="$2"; shift 2 ;;
         --base-url)   OPT_BASE_URL="$2"; shift 2 ;;
         --no-api-key) OPT_NO_API_KEY=true; shift ;;
@@ -238,10 +271,16 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# --- Resolve opencode settings ------------------------------------------------
+# --- Resolve resource limits --------------------------------------------------
 # Precedence: CLI flag > env file > shell environment > built-in default.
 # The env file is sourced above with 'set -a', which overwrites variables already
 # exported in the shell, so the CLI overrides must be applied here — after it.
+MAX_CPUS="${OPT_CPUS:-${AI_SANDBOX_CPUS:-$MAX_CPUS_DEFAULT}}"
+MAX_MEM="${OPT_MEMORY:-${AI_SANDBOX_MEMORY:-$MAX_MEM_DEFAULT}}"
+validate_cpus "$MAX_CPUS"
+validate_size "$MAX_MEM"
+
+# --- Resolve opencode settings ------------------------------------------------
 if [[ "$AGENT" == "opencode" ]]; then
     if [[ -n "$OPT_MODEL" ]]; then
         AI_SANDBOX_OPENCODE_MODEL="$OPT_MODEL"
@@ -349,10 +388,7 @@ CMD=(
     --pids-limit="${MAX_PIDS}"              # Prevent fork bombs
 
     # === RESOURCES ===
-    # NOTE: --cpus requires CONFIG_CFS_BANDWIDTH=y in the kernel.
-    # If your kernel lacks it, cpu.max won't exist and crun will fail.
-    # Uncomment the next line if your kernel supports CFS bandwidth:
-    # --cpus="${MAX_CPUS}"
+    # --cpus is appended below, only when the kernel/cgroup supports CPU quotas.
     --memory="${MAX_MEM}"
 
     # === FILESYSTEM ===
@@ -369,6 +405,16 @@ CMD=(
     # === NETWORK ===
     # slirp4netns: userspace network stack, isolated from host
 )
+
+# === CPU QUOTA ===
+CPU_LIMIT_APPLIED=false
+if cpu_quota_supported; then
+    CMD+=(--cpus="${MAX_CPUS}")
+    CPU_LIMIT_APPLIED=true
+elif [[ -n "$OPT_CPUS" || -n "${AI_SANDBOX_CPUS:-}" ]]; then
+    echo -e "${YELLOW}Warning: no CPU quota support (cpu.max missing or 'cpu' not delegated to this cgroup).${NC}" >&2
+    echo -e "${YELLOW}         --cpus=${MAX_CPUS} ignored; the container can use all host CPUs.${NC}" >&2
+fi
 
 if [[ "$NETWORK_OFF" == true ]]; then
     CMD+=(--network=none)
@@ -482,7 +528,11 @@ fi
 
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
-echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
+if [[ "$CPU_LIMIT_APPLIED" == true ]]; then
+    echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
+else
+    echo -e "  Resources: CPU unlimited (no cgroup quota), ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
+fi
 echo -e "  Home size: ${TMPFS_HOME_SIZE}"
 echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
 if [[ "$AGENT" == "opencode" ]]; then
