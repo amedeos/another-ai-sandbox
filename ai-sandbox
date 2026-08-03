@@ -3,11 +3,11 @@
 # ai-sandbox - Starts an AI coding agent in a sandboxed container
 #
 # Usage:
-#   ai-sandbox claude        [directory] [-- extra args for the agent]
-#   ai-sandbox claude-vertex [directory] [-- extra args]
-#   ai-sandbox codex         [directory] [-- extra args]
-#   ai-sandbox cursor        [directory] [-- extra args]
-#   ai-sandbox opencode [directory] [-- extra args]
+#   ai-sandbox claude        [directory] [--dir path]... [-- extra args for the agent]
+#   ai-sandbox claude-vertex [directory] [--dir path]... [-- extra args]
+#   ai-sandbox codex         [directory] [--dir path]... [-- extra args]
+#   ai-sandbox cursor        [directory] [--dir path]... [-- extra args]
+#   ai-sandbox opencode [directory] [--dir path]... [-- extra args]
 #   ai-sandbox --build [all|base|claude|codex|cursor|opencode]
 #
 # Examples:
@@ -20,6 +20,12 @@
 #   ai-sandbox claude                       # uses current directory
 #   ai-sandbox --build claude               # rebuild claude image
 #   ai-sandbox --build                      # rebuild all images
+#
+# Multiple repositories in one sandbox (--dir is repeatable):
+#   ai-sandbox claude ~/projects/api --dir ~/projects/web --dir ~/projects/shared
+#     -> /workspace/api (working directory), /workspace/web, /workspace/shared
+#   ai-sandbox claude ~/work/api --dir legacy-api=~/archive/api
+#     -> use <name>=<path> when two directories share the same basename
 #
 # API keys are read from environment variables:
 #   ANTHROPIC_API_KEY  - for Claude Code (direct API)
@@ -107,7 +113,7 @@ cpu_quota_supported() {
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
-    echo "Usage: ai-sandbox <agent> [directory] [-- extra args]"
+    echo "Usage: ai-sandbox <agent> [directory] [--dir path]... [-- extra args]"
     echo "       ai-sandbox --build [target]"
     echo ""
     echo "Available agents:"
@@ -118,6 +124,8 @@ usage() {
     echo "  opencode      - opencode CLI on any OpenAI-compatible endpoint"
     echo ""
     echo "Options:"
+    echo "      --dir [name=]<path> Mount an additional directory (repeatable), at /workspace/<name>"
+    echo "                          Defaults to the directory's basename; set <name>= on collisions"
     echo "  -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. \"git:push\")"
     echo "  -n, --network-off       Disable network (no API, local only)"
     echo "  -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)"
@@ -142,6 +150,7 @@ PROJECT_DIR=""
 NETWORK_OFF=false
 VERBOSE=false
 EXTRA_ARGS=()
+EXTRA_DIRS=()
 BLOCK_CMDS=()
 OPT_MODEL=""
 OPT_BASE_URL=""
@@ -162,6 +171,7 @@ while [[ $# -gt 0 ]]; do
             shift
             exec "$BUILD_BIN" "$@"
             ;;
+        --dir)        EXTRA_DIRS+=("$2"); shift 2 ;;
         -b|--block-cmd) BLOCK_CMDS+=("$2"); shift 2 ;;
         -n|--network-off) NETWORK_OFF=true; shift ;;
         -d|--dns)     DNS="$2"; shift 2 ;;
@@ -200,21 +210,66 @@ if [[ -n "$BLOCKED_COMMANDS" ]]; then
     done
 fi
 
-PROJECT_DIR="${PROJECT_DIR:-.}"
-PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+# --- Resolve the directories to mount -----------------------------------------
+# Each one is mounted under /workspace/<name> so it gets a distinct path for agent
+# state. The positional directory comes first and is where the agent starts;
+# every --dir adds another repository next to it.
+MOUNT_SRCS=()
+MOUNT_NAMES=()
 
-if [[ ! -d "$PROJECT_DIR" ]]; then
-    echo -e "${RED}Error: directory not found: ${PROJECT_DIR}${NC}" >&2
-    exit 1
+# Accepts "<path>" or "<name>=<path>"; the explicit name is what makes two
+# directories with the same basename (two repos called 'api') usable together.
+add_mount() {
+    local spec="$1" name="" dir="$1" i
+
+    if [[ "$spec" =~ ^([A-Za-z0-9._-]+)=(.+)$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        dir="${BASH_REMATCH[2]}"
+    fi
+
+    if [[ ! -d "$dir" ]]; then
+        echo -e "${RED}Error: directory not found: ${dir}${NC}" >&2
+        exit 1
+    fi
+    dir="$(realpath "$dir")"
+
+    [[ -n "$name" ]] || name="$(basename "$dir")"
+    if [[ -z "$name" || "$name" == "." || "$name" == ".." || "$name" == */* ]]; then
+        echo -e "${RED}Error: invalid workspace name '${name}' for ${dir}${NC}" >&2
+        echo "Set one explicitly with --dir <name>=<path>" >&2
+        exit 1
+    fi
+
+    for i in "${!MOUNT_NAMES[@]}"; do
+        [[ "${MOUNT_NAMES[$i]}" == "$name" ]] || continue
+        # The same directory listed twice is harmless; two different ones under a
+        # single name would have podman stack them at the same mount point.
+        [[ "${MOUNT_SRCS[$i]}" == "$dir" ]] && return 0
+        echo -e "${RED}Error: two directories would both mount at /workspace/${name}:${NC}" >&2
+        echo "  ${MOUNT_SRCS[$i]}" >&2
+        echo "  ${dir}" >&2
+        echo "Give one of them a different name: --dir <name>=<path>" >&2
+        exit 1
+    done
+
+    MOUNT_SRCS+=("$dir")
+    MOUNT_NAMES+=("$name")
+}
+
+add_mount "${PROJECT_DIR:-.}"
+if [[ ${#EXTRA_DIRS[@]} -gt 0 ]]; then
+    for spec in "${EXTRA_DIRS[@]}"; do
+        add_mount "$spec"
+    done
 fi
 
-# Mount under /workspace/<name> so each project gets a distinct path for agent state
-PROJECT_NAME="$(basename "$PROJECT_DIR")"
-if [[ -z "$PROJECT_NAME" || "$PROJECT_NAME" == "." || "$PROJECT_NAME" == ".." || "$PROJECT_NAME" == */* ]]; then
-    echo -e "${RED}Error: invalid project directory name: '${PROJECT_NAME}'${NC}" >&2
-    exit 1
-fi
-CONTAINER_WORKDIR="/workspace/${PROJECT_NAME}"
+PROJECT_DIR="${MOUNT_SRCS[0]}"
+CONTAINER_WORKDIR="/workspace/${MOUNT_NAMES[0]}"
+
+VOLUME_FLAGS=()
+for i in "${!MOUNT_SRCS[@]}"; do
+    VOLUME_FLAGS+=(-v "${MOUNT_SRCS[$i]}:/workspace/${MOUNT_NAMES[$i]}:Z")
+done
 
 # --- Validate home size -------------------------------------------------------
 validate_size "$TMPFS_HOME_SIZE"
@@ -393,11 +448,11 @@ CMD=(
 
     # === FILESYSTEM ===
     # Container is read-only, except:
-    #   - /workspace/<project-name>: project directory (bind mount rw)
+    #   - /workspace/<name>: one bind mount (rw) per requested directory
     #   - /tmp: tmpfs for temporary files
     #   - /home/agent: tmpfs for agent config/cache (mode=0755 for bind mounts)
     --read-only
-    -v "${PROJECT_DIR}:${CONTAINER_WORKDIR}:Z"
+    "${VOLUME_FLAGS[@]}"
     --tmpfs "/tmp:rw,size=${TMPFS_TMP_SIZE}"
     --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755,U=true"
     -w "${CONTAINER_WORKDIR}"
@@ -528,6 +583,12 @@ fi
 
 echo -e "${GREEN}Starting ${AGENT} in sandbox${NC} (${PROJECT_DIR})"
 echo -e "  Container: ${CONTAINER_NAME}"
+if [[ ${#MOUNT_SRCS[@]} -gt 1 ]]; then
+    echo -e "  Mounts:"
+    for i in "${!MOUNT_SRCS[@]}"; do
+        echo -e "    /workspace/${MOUNT_NAMES[$i]} -> ${MOUNT_SRCS[$i]}"
+    done
+fi
 if [[ "$CPU_LIMIT_APPLIED" == true ]]; then
     echo -e "  Resources: ${MAX_CPUS} CPU, ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
 else
