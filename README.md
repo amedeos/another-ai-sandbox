@@ -68,6 +68,7 @@ ai-sandbox codex  .
 ai-sandbox cursor ~/projects/other -- chat "find bugs"
 ai-sandbox opencode ~/projects/my-repo        # opencode, Ollama Cloud by default
 ai-sandbox claude                              # uses current directory
+ai-sandbox claude ~/projects/api --dir ~/projects/web   # two repos in one sandbox
 ```
 
 ## Install
@@ -107,18 +108,19 @@ Every container is launched with the following hardening measures:
 | `--network=pasta`             | Kernel-backed isolated network (fast, uses user namespaces)|
 | `--tmpfs /tmp`                | Temporary writable area, destroyed at session end          |
 | `--mount type=tmpfs,dst=/home/agent` | Agent home on tmpfs (mode 0755), destroyed at session end |
-| Bind mount only `/workspace/<project-name>` | Agent sees ONLY the project directory                      |
+| Bind mount only `/workspace/<name>` | Agent sees ONLY the directories you passed in               |
 | BPF LSM command blocker       | Blocks specific commands (e.g. git push) inside the container via eBPF |
 
 ## Usage
 
 ```
-ai-sandbox <agent> [directory] [-- extra args for the agent]
+ai-sandbox <agent> [directory] [--dir path]... [-- extra args for the agent]
 ai-sandbox --build [all|base|claude|codex|cursor|opencode]
 
 Agents:   claude | claude-vertex | codex | cursor | opencode
 
 Options:
+      --dir [name=]<path> Mount an additional directory (repeatable), at /workspace/<name>
   -b, --block-cmd <b:a>   Block command inside container (repeatable, e.g. "git:push")
   -n, --network-off       Disable network completely (--network=none)
   -d, --dns <server>      DNS server (default: 1.1.1.1, env: AI_SANDBOX_DNS)
@@ -134,6 +136,29 @@ Options for opencode:
       --base-url <url>    API endpoint (default: https://ollama.com/v1, env: AI_SANDBOX_OPENCODE_BASE_URL)
       --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)
 ```
+
+## Multiple Repositories
+
+The positional directory is the one the agent starts in. Every `--dir` mounts another directory alongside it, each at its own path under `/workspace/`:
+
+```bash
+ai-sandbox claude ~/projects/api --dir ~/projects/web --dir ~/projects/shared
+```
+
+```
+/workspace/api      -> ~/projects/api      (working directory)
+/workspace/web      -> ~/projects/web
+/workspace/shared   -> ~/projects/shared
+```
+
+The mount name defaults to the directory's basename. If two directories share the same basename, ai-sandbox refuses to start rather than stacking them at one mount point — name one of them explicitly with `<name>=<path>`:
+
+```bash
+ai-sandbox claude ~/work/api --dir legacy-api=~/archive/api
+# /workspace/api and /workspace/legacy-api
+```
+
+All mounts are read-write and each one is a separate bind mount, so the agent still sees nothing outside the directories you listed. Passing the same directory twice is a no-op.
 
 ## Resource Limits
 
