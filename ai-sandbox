@@ -137,21 +137,30 @@ cpu_quota_supported() {
 start_detached() {
     local keep_rm="$1" detach_flags="$2" arg
     local -a cmd=()
+    local in_podman_args=true
 
     for arg in "${CMD[@]}"; do
-        case "$arg" in
-            --rm)
-                if [[ "$keep_rm" == true ]]; then
-                    cmd+=("$arg")
-                fi
-                continue
-                ;;
-            -it|-i|-t)
-                continue
-                ;;
-        esac
+        # Everything from the image onwards belongs to the agent, not to
+        # podman. Rewriting it too would strip an agent's own -t and insert a
+        # detach flag after an agent subcommand that happens to be called
+        # "run" -- opencode has one -- so the rewrite stops at the image.
+        if [[ "$in_podman_args" == true && "$arg" == "$IMAGE" ]]; then
+            in_podman_args=false
+        elif [[ "$in_podman_args" == true ]]; then
+            case "$arg" in
+                --rm)
+                    if [[ "$keep_rm" == true ]]; then
+                        cmd+=("$arg")
+                    fi
+                    continue
+                    ;;
+                -it|-i|-t)
+                    continue
+                    ;;
+            esac
+        fi
         cmd+=("$arg")
-        if [[ "$arg" == "run" ]]; then
+        if [[ "$in_podman_args" == true && "$arg" == "run" ]]; then
             cmd+=("$detach_flags")
         fi
     done
@@ -732,7 +741,13 @@ if [[ "$WEB_MODE" == true ]]; then
         # than a /dev/urandom pipeline: `tr ... | head -c 4` leaves tr writing
         # to a closed pipe, and under `set -o pipefail` that SIGPIPE takes the
         # whole script down.  This is collision avoidance, not a secret.
-        SESSION="${AGENT}-${MOUNT_NAMES[0]}-$(printf '%04x' "$((RANDOM % 65536))")"
+        # The directory name has to be filed down first: it becomes part of a
+        # session name, and validate_session_name below allows only
+        # [A-Za-z0-9_-]. Dots alone are common enough (example.com, foo.git,
+        # bar.d) that leaving them in made --web abort on the default path.
+        slug="${MOUNT_NAMES[0]//[^A-Za-z0-9_-]/-}"
+        slug="${slug#"${slug%%[A-Za-z0-9]*}"}"
+        SESSION="${AGENT}-${slug:-session}-$(printf '%04x' "$((RANDOM % 65536))")"
         SESSION="${SESSION:0:48}"
     fi
     validate_session_name "$SESSION"
@@ -1116,8 +1131,16 @@ if [[ "$WEB_MODE" == true ]]; then
 
     "${BUILDER}" wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1
 
+    # Failing here would otherwise leave the container running with no command
+    # blocking at all and, under `set -e`, no message beyond the cgroup error:
+    # the agent would be up, unblocked, and unmentioned. The BPF-only path is
+    # protected by its EXIT trap; this one has none, so it cleans up itself.
     if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
-        start_bpf_blocker "$CONTAINER_ID"
+        if ! start_bpf_blocker "$CONTAINER_ID"; then
+            echo -e "${RED}Error: command blocking could not be started.${NC}" >&2
+            "${BUILDER}" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+            exit 1
+        fi
     fi
 
     # A container that dies immediately -- a bad key, an agent that refuses to

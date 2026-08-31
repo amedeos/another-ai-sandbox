@@ -413,6 +413,26 @@ test_dirs_completion() {
     fi
 }
 
+# The default session name is built from the directory's own name, and dots in
+# a directory name are ordinary (example.com, foo.git, bar.d).
+test_dotted_directory_session_name() {
+    run_test "--web on a dotted directory name still gets a valid session name"
+
+    local dir="${WORK_DIR}/proj.example.com" out
+    mkdir -p "$dir"
+    out="$("$AI_SANDBOX" "$TEST_AGENT" "$dir" --web --network-off \
+        --non-interactive -- --version 2>&1)" || true
+
+    # The run may still fail later -- `--version` exits, so the session never
+    # comes up -- and ai-sandbox removes the container itself when it does.
+    # What must not happen is being refused before anything is created.
+    if ! grep -qi "invalid session name" <<<"$out"; then
+        pass
+    else
+        fail "$(tr '\n' ' ' <<<"$out" | tail -c 120)"
+    fi
+}
+
 # The real script's own output: `ai-sandbox --web` must produce the opt-in
 # label set. That the dashboard then picks such a session up is
 # test_web_session_listed's job, asserted there against a session that stays
@@ -796,6 +816,7 @@ test_start_rejects_unknown_agent
 test_start_rejects_bad_block_rule
 test_start_refuses_hidden_directory
 test_dirs_completion
+test_dotted_directory_session_name
 test_web_session_labels
 test_web_session_listed
 test_list_shows_web_session
