@@ -552,9 +552,26 @@ do_uninstall() {
     #    Only --web sessions can outlive the shell that started them, so this is
     #    the one place an uninstall can leave containers running.
     if command -v podman >/dev/null 2>&1; then
-        local -a web_sessions
-        mapfile -t web_sessions < <(podman ps -a --filter label=ai-sandbox.web=1 \
-            --format '{{index .Labels "ai-sandbox.session"}}' 2>/dev/null || true)
+        # `ps -q` and an inspect each, and the exit status is checked: a
+        # --format template over the listing addresses Go struct fields rather
+        # than the JSON keys of the same output, and an unchecked failure would
+        # read as "no sessions" -- silently skipping the one step of the
+        # uninstall that stops containers able to outlive this shell.
+        local -a ids web_sessions
+        local raw name id
+        if ! raw="$(podman ps -a --filter label=ai-sandbox.web=1 -q 2>&1)"; then
+            warn "Could not list sandbox sessions: ${raw}"
+            warn "Any still running must be removed by hand: podman rm -f <name>"
+            raw=""
+        fi
+        mapfile -t ids <<<"$raw"
+        web_sessions=()
+        for id in "${ids[@]}"; do
+            [[ -n "$id" ]] || continue
+            name="$(podman inspect --format \
+                '{{index .Config.Labels "ai-sandbox.session"}}' "$id" 2>/dev/null)" || continue
+            [[ -n "$name" ]] && web_sessions+=("$name")
+        done
         if [[ ${#web_sessions[@]} -gt 0 ]]; then
             echo ""
             info "These sandbox sessions are still present:"
@@ -562,11 +579,12 @@ do_uninstall() {
             echo -en "\n  Remove them? [y/N] "
             read -r answer
             if [[ "$answer" =~ ^[yY]$ ]]; then
-                local ids
-                mapfile -t ids < <(podman ps -a --filter label=ai-sandbox.web=1 -q)
-                podman rm -f "${ids[@]}" >/dev/null 2>&1 || true
-                log "Removed leftover sandbox sessions"
-                removed=1
+                if podman rm -f "${ids[@]}" >/dev/null 2>&1; then
+                    log "Removed leftover sandbox sessions"
+                    removed=1
+                else
+                    warn "Could not remove some sessions — check: podman ps -a"
+                fi
             else
                 info "Left running — stop them later with: podman rm -f <name>"
             fi

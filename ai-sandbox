@@ -365,6 +365,11 @@ do_list() {
         # One field per line: a tab separator inside a Go template is a literal
         # backslash-t unless podman normalises it, and that is exactly the kind
         # of assumption this function exists to avoid.
+        # Cleared every time: a container removed between `ps` and `inspect`
+        # gives short output, the reads then fail at EOF, and whatever they
+        # leave behind would otherwise be the previous session's parameters
+        # printed against this one's name.
+        session=""; agent=""; cols=""; rows=""; network=""; mounts=""
         { read -r session; read -r agent; read -r cols; read -r rows
           read -r network; read -r mounts
         } < <("${BUILDER}" inspect --format \
@@ -381,7 +386,6 @@ do_list() {
         hostdir="${mounts%%;*}"; hostdir="${hostdir#*=}"
         out+="$(printf '  %-26s %-14s %-9s %-7s %s' \
                 "$session" "$agent" "${cols}x${rows}" "$network" "$hostdir")"$'\n'
-        session=""
     done
 
     if [[ -z "$out" ]]; then
@@ -426,7 +430,15 @@ do_stop() {
 
     # SIGTERM reaches ai-sandbox-supervise, which kills the zellij session; --rm
     # then removes the container.
-    "${BUILDER}" stop -t 10 "$ctr" >/dev/null
+    #
+    # The status is checked rather than left to `set -e`: the --all loop calls
+    # this as `do_stop "$session" || rc=1`, which disables errexit for the
+    # whole function body, so a failed stop would fall through to the success
+    # message and --all would report having stopped sessions it had not.
+    if ! "${BUILDER}" stop -t 10 "$ctr" >/dev/null; then
+        echo -e "${RED}Error: could not stop '${target}'.${NC}" >&2
+        return 1
+    fi
     echo -e "${GREEN}Stopped${NC} ${target}"
 }
 
