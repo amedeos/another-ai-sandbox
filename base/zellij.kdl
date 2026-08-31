@@ -3,10 +3,13 @@
 // Installed to /etc/zellij/config.kdl; selected via ZELLIJ_CONFIG_FILE.
 // =============================================================================
 
-// Load-bearing: with serialization on, an exited session lingers in
-// `zellij list-sessions` so it can be resurrected.  ai-sandbox-supervise polls
-// that listing to decide when the agent is done, so a lingering session would
-// keep container PID 1 alive forever and --rm would never fire.
+// Load-bearing: with serialization on, an exited session is kept for
+// resurrection instead of being torn down, so its socket stays and
+// ai-sandbox-supervise -- which waits on exactly that socket to decide the
+// agent is done -- would keep container PID 1 alive forever and --rm would
+// never fire.  (The supervisor deliberately does not poll `zellij
+// list-sessions`: every client connection resets the idle teardown, so the
+// poll would prevent the very teardown it waits for.)
 session_serialization false
 
 // The agent TUI owns the screen; give it every column and row available.

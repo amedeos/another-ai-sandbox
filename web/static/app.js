@@ -21,7 +21,7 @@ const MAX_ZOOM = 2.5;
 // emulator, and the session is asked to match. A CSS transform is only the
 // fallback for when it refuses.
 const state = { term: null, attachId: null, source: null, session: null, pending: [],
-                fontScale: 1 };
+                fontScale: 1, opening: false };
 
 async function api(path, options = {}) {
   const opts = Object.assign({ headers: {} }, options);
@@ -111,7 +111,8 @@ const lines = (id) => $(id).value.split('\n').map((v) => v.trim()).filter(Boolea
 // does the presenting -- matching ignores case, but what lands in the field is
 // the exact name on disk, because that is what gets mounted.
 let dirTimer = null;
-let dirCache = '';
+let dirCache = null;                  // null, not '': an empty field is a real
+                                      // directory to ask about (the first root)
 async function completeDirs() {
   const typed = $('dir').value;
   const upto = typed.slice(0, typed.lastIndexOf('/') + 1);
@@ -135,7 +136,7 @@ $('dir').addEventListener('input', () => {
   window.clearTimeout(dirTimer);
   dirTimer = window.setTimeout(completeDirs, 150);
 });
-$('dir').addEventListener('focus', () => { dirCache = ''; completeDirs(); });
+$('dir').addEventListener('focus', () => { dirCache = null; completeDirs(); });
 
 $('start').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -304,6 +305,21 @@ async function uploadImage(file) {
 }
 
 async function openTerminal(session) {
+  // A second click before the first POST resolves would overwrite
+  // state.attachId and state.source, leaving the first EventSource open --
+  // and because the stream refreshes last_seen on every loop, the reaper
+  // would never collect it either. That is a phantom zellij client for the
+  // life of the session, which is the leak closeTerminal exists to prevent.
+  if (state.opening || state.attachId) return;
+  state.opening = true;
+  try {
+    await attachTerminal(session);
+  } finally {
+    state.opening = false;
+  }
+}
+
+async function attachTerminal(session) {
   let info;
   try {
     info = await apiJson(`/api/sessions/${session.session}/attach`, { method: 'POST' });
