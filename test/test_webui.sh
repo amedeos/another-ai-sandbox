@@ -130,13 +130,16 @@ skip() {
 # the agent, because every real agent CLI either exits at once or needs
 # credentials the test cannot assume. test_web_session_labels covers the real
 # script's own output; everything else needs a session that stays up.
+# $2 is the podman network mode.  It matters: the reachability test below has
+# to run with the *default* network, since a container with --network=none
+# cannot reach anything and would pass that test no matter what.
 start_web_session() {
-    local name="$1"
+    local name="$1" network="${2:-none}"
 
     podman run -d --rm --name "sandbox-${name}" \
         --userns=keep-id:uid=1000,gid=1000 \
         --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 \
-        --read-only --network=none \
+        --read-only "--network=${network}" \
         -v "${WORK_DIR}:/workspace/work:Z" \
         --tmpfs "/tmp:rw,size=256m" \
         --mount "type=tmpfs,destination=/home/agent,tmpfs-size=256m,tmpfs-mode=0755,U=true" \
@@ -147,7 +150,7 @@ start_web_session() {
         --label "ai-sandbox.workdir=/workspace/work" \
         --label "ai-sandbox.cols=100" \
         --label "ai-sandbox.rows=30" \
-        --label "ai-sandbox.network=none" \
+        --label "ai-sandbox.network=${network}" \
         -e "AI_SANDBOX_WEB=1" -e "AI_SANDBOX_SESSION=${name}" \
         --entrypoint /usr/local/bin/ai-sandbox-supervise \
         "$TEST_IMAGE" /bin/bash -c 'while :; do sleep 5; done' >/dev/null 2>&1 || return 1
@@ -382,9 +385,11 @@ test_dual_attach() {
     fi
 
     # Client A: a terminal client, exactly as `ai-sandbox attach` makes one.
-    podman exec -i "sandbox-${name}" zellij attach "$name" >/dev/null 2>&1 &
+    # -it, not -i: a zellij client with no TTY does not attach at all, which
+    # would make this test quietly measure one client instead of two.
+    podman exec -it "sandbox-${name}" zellij attach "$name" >/dev/null 2>&1 &
     local pid_a=$!
-    sleep 3
+    sleep 4
 
     # Client B: the browser, through the dashboard's own PTY.
     local attach_id
@@ -510,9 +515,11 @@ test_invalid_session_name_rejected() {
 test_container_cannot_reach_dashboard() {
     run_test "a sandbox cannot reach the dashboard"
 
+    # Networked on purpose: with --network=none this test would pass whatever
+    # the dashboard does.
     local name="wt2$$"
-    if ! start_web_session "$name"; then
-        skip "session did not start"
+    if ! start_web_session "$name" pasta; then
+        skip "session did not start (is pasta available?)"
         teardown_session "$name"
         return
     fi
@@ -570,9 +577,14 @@ test_session_cleanup() {
 test_no_prompt_without_tty() {
     run_test "--web fails instead of hanging without a terminal"
 
-    local rc=0
-    env -u ANTHROPIC_API_KEY timeout 30 "$AI_SANDBOX" claude "$WORK_DIR" \
+    # A throwaway HOME on purpose: with the real one, an existing ~/.claude (or
+    # an env file) sends ai-sandbox down its "using OAuth session" fallback and
+    # the guard under test is never reached.
+    local fake_home rc=0
+    fake_home="$(mktemp -d)"
+    env -u ANTHROPIC_API_KEY HOME="$fake_home" timeout 30 "$AI_SANDBOX" claude "$WORK_DIR" \
         --web --web-name "wt3$$" </dev/null >/dev/null 2>&1 || rc=$?
+    rm -rf "$fake_home"
 
     teardown_session "wt3$$"
 

@@ -654,6 +654,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "no such web session"})
             return
         cols, rows = session_geometry(session)
+        # Same belt and braces as `ai-sandbox attach`: on a slow machine the
+        # supervisor's startup-tip sweep can finish before zellij creates the
+        # tip pane, and it would then take the first keystroke.
+        podman("exec", container, "zellij", "--session", session,
+               "action", "hide-floating-panes", "--tab-id", "0", timeout=10)
         try:
             att = Attachment(session, container, cols, rows)
         except OSError as exc:
