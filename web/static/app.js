@@ -51,8 +51,10 @@ function sessionRow(s) {
   name.textContent = s.session;
   const meta = document.createElement('div');
   meta.className = 'meta';
-  const bits = [s.agent, s.workdir, `${s.cols}x${s.rows}`,
-                `${s.cpus} cpu`, s.memory, `net: ${s.network}`];
+  const extra = (s.mounts || '').split(';').filter(Boolean).length - 1;
+  const bits = [s.agent, s.hostdir || s.workdir,
+                extra > 0 ? `+${extra} more` : '',
+                `${s.cols}x${s.rows}`, `${s.cpus} cpu`, s.memory, `net: ${s.network}`];
   if (s.blocked) bits.push(`blocked: ${s.blocked}`);
   meta.textContent = bits.filter(Boolean).join(' · ');
   label.append(name, meta);
@@ -101,6 +103,8 @@ async function refresh() {
   }
 }
 
+const lines = (id) => $(id).value.split('\n').map((v) => v.trim()).filter(Boolean);
+
 $('start').addEventListener('submit', async (e) => {
   e.preventDefault();
   const err = $('start-error');
@@ -113,10 +117,11 @@ $('start').addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         agent: $('agent').value,
-        dirs: [$('dir').value.trim()],
+        dirs: [$('dir').value.trim(), ...lines('dirs-extra')],
         name: $('name').value.trim(),
         cpus: $('cpus').value.trim(),
         memory: $('memory').value.trim(),
+        blocked: lines('blocked'),
         network_off: $('network_off').checked,
         // The grid this window would give it. A session's geometry is fixed
         // when it is created, and a hardcoded default made every session
@@ -126,7 +131,9 @@ $('start').addEventListener('submit', async (e) => {
       }),
     });
     $('dir').value = '';
+    $('dirs-extra').value = '';
     $('name').value = '';
+    $('blocked').value = '';
     refresh();
   } catch (ex) {
     err.textContent = ex.message;

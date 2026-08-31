@@ -43,6 +43,10 @@
           <label>Directory
             <input id="dir" placeholder="/home/you/projects/repo" required>
           </label>
+          <label>More directories <span class="muted">(one per line)</span>
+            <textarea id="dirs-extra" rows="2"
+                      placeholder="/home/you/projects/other"></textarea>
+          </label>
           <label>Name <span class="muted">(optional)</span>
             <input id="name" placeholder="auto">
           </label>
@@ -51,6 +55,9 @@
           </label>
           <label>Memory
             <input id="memory" placeholder="4g">
+          </label>
+          <label>Blocked commands <span class="muted">(one per line)</span>
+            <textarea id="blocked" rows="2" placeholder="git:push"></textarea>
           </label>
           <label class="check">
             <input type="checkbox" id="network_off"> Disable network

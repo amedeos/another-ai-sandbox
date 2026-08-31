@@ -368,6 +368,25 @@ test_start_rejects_unknown_agent() {
 # label set. That the dashboard then picks such a session up is
 # test_web_session_listed's job, asserted there against a session that stays
 # up rather than here against one racing its own teardown.
+# The start form now takes --block-cmd rules, which end up as arguments to a
+# program run under sudo. Nothing reaches a shell, but the shape is checked
+# before the rules are passed on, and a rejected start must start nothing.
+test_start_rejects_bad_block_rule() {
+    run_test "the start API refuses a malformed block rule"
+
+    local before after body
+    before="$(podman ps -q | wc -l)"
+    body="$(web POST /api/sessions -H 'Content-Type: application/json' \
+        -d "{\"agent\":\"claude\",\"dirs\":[\"${WORK_DIR}\"],\"blocked\":[\"git; rm -rf /\"]}")"
+    after="$(podman ps -q | wc -l)"
+
+    if grep -q 'invalid block rule' <<<"$body" && [[ "$before" == "$after" ]]; then
+        pass
+    else
+        fail "body=${body}"
+    fi
+}
+
 test_web_session_labels() {
     run_test "ai-sandbox --web labels the container and gives the agent a TERM"
 
@@ -722,6 +741,7 @@ test_csrf_header_required
 test_optin_isolation
 test_start_rejects_bad_directory
 test_start_rejects_unknown_agent
+test_start_rejects_bad_block_rule
 test_web_session_labels
 test_web_session_listed
 test_list_shows_web_session

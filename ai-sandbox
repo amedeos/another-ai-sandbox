@@ -343,7 +343,7 @@ web_container_ids() {
 # ai-sandbox list
 do_list() {
     local -a ids
-    local raw id out="" session agent cols rows network workdir
+    local raw id out="" session agent cols rows network mounts hostdir
 
     # Captured, not piped from a process substitution: that would report
     # mapfile's exit status and swallow podman's, which is the whole failure
@@ -357,17 +357,21 @@ do_list() {
         # backslash-t unless podman normalises it, and that is exactly the kind
         # of assumption this function exists to avoid.
         { read -r session; read -r agent; read -r cols; read -r rows
-          read -r network; read -r workdir
+          read -r network; read -r mounts
         } < <("${BUILDER}" inspect --format \
             '{{index .Config.Labels "ai-sandbox.session"}}
 {{index .Config.Labels "ai-sandbox.agent"}}
 {{index .Config.Labels "ai-sandbox.cols"}}
 {{index .Config.Labels "ai-sandbox.rows"}}
 {{index .Config.Labels "ai-sandbox.network"}}
-{{index .Config.Labels "ai-sandbox.workdir"}}' "$id" 2>/dev/null) || true
+{{index .Config.Labels "ai-sandbox.mounts"}}' "$id" 2>/dev/null) || true
         [[ -n "$session" ]] || continue
+        # The host path the session was started on, out of `name=/path;...`,
+        # rather than the container's own /workspace/<name>: that is an
+        # internal detail, and not a directory the reader can act on.
+        hostdir="${mounts%%;*}"; hostdir="${hostdir#*=}"
         out+="$(printf '  %-26s %-14s %-9s %-7s %s' \
-                "$session" "$agent" "${cols}x${rows}" "$network" "$workdir")"$'\n'
+                "$session" "$agent" "${cols}x${rows}" "$network" "$hostdir")"$'\n'
         session=""
     done
 

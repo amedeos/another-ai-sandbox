@@ -445,7 +445,7 @@ The web layer adds no privileges to the sandboxes and no new paths into them.
 - **Loopback only**, with a 256-bit bearer token generated on first start in `~/.config/ai-sandbox/web-token` (mode 0600, never mounted into a container, never passed as an environment variable). The bind address is refused if it is not loopback: there is no TLS here, so put a reverse proxy in front if you need remote access.
 - Requests are checked for a `Host` we actually bound (a DNS-rebinding defence — note that it does *not* stop a process inside a container, which can send any `Host`; the token does), an `Origin` on the same loopback, and an `X-AI-Sandbox` header on anything state-changing. Browser assets are pinned by SHA256 and served from disk, so the page's `Content-Security-Policy` can be `default-src 'self'` with no CDN at runtime.
 - The dashboard is served by Python's `http.server`, which upstream documents as not for production. That is acceptable here precisely because the socket is loopback-only, single-user and token-gated — do not widen it.
-- `--block-cmd` sessions cannot be started from the dashboard: the BPF loader needs `sudo`, which cannot prompt from a systemd user service. Start those from a terminal.
+- `--block-cmd` rules can be given in the dashboard's start form, one per line, but the BPF loader needs `sudo` and a systemd user service has no terminal to prompt at. The host must therefore grant **passwordless** sudo for the loader; without it `ai-sandbox` refuses the start and the dashboard shows that error. Rules are validated against `<binary>:<argument>` before they are passed on.
 
 ### Screenshot and image paste
 

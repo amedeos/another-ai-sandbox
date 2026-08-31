@@ -66,6 +66,12 @@ AGENTS = ("claude", "claude-vertex", "codex", "cursor", "opencode")
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
 CPUS_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 SIZE_RE = re.compile(r"^[0-9]+[bkmg]$")
+# A --block-cmd rule: a binary, a colon, and optionally the argument to match.
+# The argument half may carry spaces ("git:push --force"), so rules are taken
+# one per line rather than split on whitespace. Nothing here reaches a shell --
+# each rule is one argv element -- but the charset stays narrow anyway, because
+# this is browser input on its way to a program running under sudo.
+BLOCK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}:[A-Za-z0-9 ._+=/@:,-]{0,128}$")
 
 LABEL_PREFIX = "ai-sandbox."
 MAX_PASTE_BYTES = 10 * 1024 * 1024
@@ -131,6 +137,21 @@ def label_int(labels, key, default):
         return default
 
 
+def primary_hostdir(labels):
+    """The host path the session was started on, not the path inside it.
+
+    ai-sandbox records mounts as `name=/host/path;name2=/host/path2`, the first
+    being the working directory. Everything else about a session is shown in
+    the user's terms, and /workspace/<name> is an implementation detail of the
+    container -- it is not a path they can act on.
+    """
+    mounts = labels.get(f"{LABEL_PREFIX}mounts", "")
+    first = mounts.split(";", 1)[0]
+    if "=" in first:
+        return first.split("=", 1)[1]
+    return labels.get(f"{LABEL_PREFIX}workdir", "")
+
+
 def list_sessions():
     """Every running container carrying the opt-in label, with its parameters.
 
@@ -163,6 +184,7 @@ def list_sessions():
             "session": name,
             "agent": labels.get(f"{LABEL_PREFIX}agent", ""),
             "workdir": labels.get(f"{LABEL_PREFIX}workdir", ""),
+            "hostdir": primary_hostdir(labels),
             "mounts": labels.get(f"{LABEL_PREFIX}mounts", ""),
             "cpus": labels.get(f"{LABEL_PREFIX}cpus", ""),
             "memory": labels.get(f"{LABEL_PREFIX}memory", ""),
@@ -287,11 +309,19 @@ def validate_start_spec(body):
     if body.get("network_off"):
         argv.append("--network-off")
 
-    # --block-cmd needs sudo, which cannot prompt from a systemd user service.
-    # Refused explicitly rather than failing obscurely later.
-    if body.get("blocked"):
-        raise ValueError("--block-cmd sessions must be started from a terminal "
-                         "(the BPF loader needs sudo)")
+    # --block-cmd needs sudo for the BPF loader, which cannot prompt from a
+    # systemd user service. That is a question of whether *this* host grants
+    # passwordless sudo for it, which ai-sandbox already answers with a clear
+    # error, so the rules are passed on and its answer is reported rather than
+    # refused here on a guess.
+    blocked = body.get("blocked") or []
+    if not isinstance(blocked, list) or len(blocked) > 16:
+        raise ValueError("invalid blocked rules (a list, at most 16)")
+    for rule in blocked:
+        if not isinstance(rule, str) or not BLOCK_RE.match(rule):
+            raise ValueError(f"invalid block rule: {rule!r} "
+                             "(expected <binary>:<argument>, e.g. git:push)")
+        argv += ["--block-cmd", rule]
 
     argv += ["--web", "--non-interactive"]
     return argv
