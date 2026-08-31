@@ -404,12 +404,14 @@ ai-sandbox stop claude-my-project-a1b2      # or: ai-sandbox stop --all
 xdg-open "http://127.0.0.1:8765/?t=$(cat ~/.config/ai-sandbox/web-token)"
 ```
 
+The dashboard starts sessions with the same parameters as the command line: agent, the working directory and any number of extra directories (one per line, each mounted at `/workspace/<name>` like `--dir`), an optional session name, CPUs, memory, network on/off, and `--block-cmd` rules one per line. It builds no `podman run` of its own — it invokes `ai-sandbox`, so every session is hardened identically however it was started.
+
 Without `--web` nothing changes: the agent is PID 1 in a foreground container, zellij never runs, and the container carries no labels.
 
 | Flag | Env var | Meaning |
 |------|---------|---------|
 | `--web` | `AI_SANDBOX_WEB=1` | Detachable session, visible to the dashboard |
-| `--web-name <name>` | `AI_SANDBOX_SESSION` | Session name (default `<agent>-<dir>-<random>`) |
+| `--web-name <name>` | `AI_SANDBOX_SESSION` | Session name (default `<agent>-<dir>-<random>`; the directory part is filed down to letters, digits, `-` and `_`, so `~/my.repo` gives `claude-my-repo-…`) |
 | `--web-size <CxR>` | — | Session geometry when there is no terminal to measure |
 | — | `AI_SANDBOX_WEB_ADDR` / `AI_SANDBOX_WEB_PORT` | Dashboard bind address and port |
 | — | `AI_SANDBOX_WEB_ROOTS` | Colon-separated roots a dashboard-started session may mount from (default `$HOME`) |
@@ -432,6 +434,8 @@ The session name is the single identifier throughout: it is the zellij session, 
  terminal ─ ai-sandbox attach <s> ─┘
 ```
 
+`TERM` and `COLORTERM` are set on the container, not on the attach: zellij hands its panes the environment of the zellij server, which is container PID 1, so that is the only place an agent can learn it has a terminal at all — a `TERM` given to `podman exec … zellij attach` reaches the client and never the agent, which would then render in black and white for every viewer. `--web` passes the launching terminal's own `TERM` (the image's `xterm-256color` is the default for anything else), and refuses to pass on a useless one: a systemd user service has `TERM=dumb`, and handing that to an agent claims a terminal that cannot do colour.
+
 The agent runs inside a detached [zellij](https://zellij.dev) session, which is what makes detaching safe: the terminal and the browser are both ordinary zellij clients, and closing either one leaves the agent untouched. Container PID 1 is a small supervisor that outlives every client and exits only when the agent does, at which point `--rm` removes the container.
 
 ### Security
@@ -442,7 +446,8 @@ The web layer adds no privileges to the sandboxes and no new paths into them.
 - **Sessions are opt-in.** Only `--web` containers carry `ai-sandbox.*` labels. Every attach, stop and exec re-checks the label on the container itself rather than trusting a listing, so a session started without `--web` reports as *absent*, not as refused.
 - **The dashboard never builds a `podman run` command.** It starts sessions by invoking `ai-sandbox`, so container hardening stays single-sourced and cannot be weakened from the browser.
 - **The start API validates every field** and passes each as its own argv element — no shell is involved. Directories must resolve strictly below `AI_SANDBOX_WEB_ROOTS` (default `$HOME`), so a request cannot ask for a sandbox over `/`.
-- **The Directory field completes as you type**, from `GET /api/dirs`, which lists the immediate children of the directory being typed in and never recurses — the cost of a request is one `scandir`, whatever the size of the tree below. It is bound by the same roots (browsing a root is allowed; mounting one is not), so it cannot be used to probe the filesystem, and hidden directories are neither offered nor accepted: `~/.ssh`, `~/.gnupg` and `~/.config/ai-sandbox` all sit below `$HOME`, and the last one holds the dashboard's own token and the API-key file. Mounts are read-write, so a dot directory would hand a compromised agent the host — start such a session from a terminal, where the person typing is the one choosing. Matching ignores case as a typing convenience, but the paths offered are the exact names on disk: on a case-sensitive filesystem `~/Repos` and `~/repos` are two directories, and choosing between them is not the server's job.
+- **Hidden directories are neither offered nor accepted.** Being below `$HOME` is not enough to be safe to mount: `~/.ssh`, `~/.gnupg` and `~/.config/ai-sandbox` all are, and the last holds the dashboard's own token and the API-key file. Mounts are read-write, so a dot directory would hand a compromised agent the host. A dot component anywhere below the root is refused — from the terminal it still works, because there the person typing is the one choosing.
+- **The Directory field completes as you type**, from `GET /api/dirs`, which lists the immediate children of the directory being typed in and never recurses: one `scandir` per request, whatever the size of the tree below, capped at 500 entries. It is bound by the same roots (browsing a root is allowed, mounting one is not), so it cannot be used to probe the filesystem. Matching ignores case as a typing convenience, but the paths offered are the exact names on disk — on a case-sensitive filesystem `~/Repos` and `~/repos` are two directories, and choosing between them is not the server's job.
 - **Loopback only**, with a 256-bit bearer token generated on first start in `~/.config/ai-sandbox/web-token` (mode 0600, never mounted into a container, never passed as an environment variable). The bind address is refused if it is not loopback: there is no TLS here, so put a reverse proxy in front if you need remote access.
 - Requests are checked for a `Host` we actually bound (a DNS-rebinding defence — note that it does *not* stop a process inside a container, which can send any `Host`; the token does), an `Origin` on the same loopback, and an `X-AI-Sandbox` header on anything state-changing. Browser assets are pinned by SHA256 and served from disk, so the page's `Content-Security-Policy` can be `default-src 'self'` with no CDN at runtime.
 - The dashboard is served by Python's `http.server`, which upstream documents as not for production. That is acceptable here precisely because the socket is loopback-only, single-user and token-gated — do not widen it.
