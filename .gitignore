@@ -3,3 +3,7 @@ bpf/vmlinux.h
 bpf/block_commands.bpf.o
 bpf/block_commands.skel.h
 bpf/loader
+
+# Web UI assets fetched at install time
+web/static/vendor/
+__pycache__/
