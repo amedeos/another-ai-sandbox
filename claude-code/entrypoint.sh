@@ -3,4 +3,4 @@
 ln -sfn /opt/claude-local ~/.local
 mkdir -p ~/.cache ~/.config
 export PATH="${HOME}/.local/bin:${PATH}"
-exec claude "$@"
+exec ai-sandbox-supervise claude "$@"

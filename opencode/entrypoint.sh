@@ -44,4 +44,4 @@ jq -n \
         model: ("custom/" + $model)
     }' > ~/.config/opencode/opencode.json
 
-exec opencode "$@"
+exec ai-sandbox-supervise opencode "$@"

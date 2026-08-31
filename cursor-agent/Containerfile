@@ -21,7 +21,10 @@ RUN CURSOR_VERSION_DIR=$(find /home/agent/.local/share/cursor-agent/versions -mi
     && chmod 755 /opt/cursor-agent/cursor-agent /opt/cursor-agent/node \
     && ln -sf /opt/cursor-agent/cursor-agent /usr/local/bin/cursor-agent
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
 USER agent
 WORKDIR /workspace
 
-ENTRYPOINT ["/usr/local/bin/cursor-agent"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
