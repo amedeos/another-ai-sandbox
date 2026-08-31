@@ -453,9 +453,11 @@ Pasting an image into the browser terminal uploads it into the session's `/tmp` 
 
 ### Terminal size with two clients
 
-zellij collapses a shared session to its **smallest** attached client, which would let a browser window shrink your terminal. So the browser does not impose its size: it adopts the session's geometry and scales the rendered grid to fit the window, and only requests a real resize when the server confirms it is the session's only client.
+zellij sizes a shared session to its **smallest** attached client — measured against 0.45.1: a 200x50 client and a 100x30 one give a 100x29 session, and it springs back to 200x50 when the small client leaves. A client *larger* than the session shrinks nobody.
 
-One consequence is worth knowing: if you resize your *terminal* while a browser is attached, zellij still reflows to the smaller of the two. There is no fix for that at this layer. `--web-size` gives a deterministic geometry to sessions started from the dashboard, which have no terminal to measure.
+So the browser may **grow** the session freely, and that is what it does on attach: it adopts the geometry recorded on the container, then asks for its own window's grid. **Shrinking** is what would drag another client down, so a request for less than the browser's current size is refused with `409` while anyone else is attached; the browser then scales the rendered grid to fit, and the zoom control in the header is there to read a session too wide for the window. Zoom is presentation only and never changes the session's geometry.
+
+Two consequences are worth knowing: if you resize your *terminal* while a browser is attached, zellij still reflows to the smaller of the two, and there is no fix for that at this layer; and a session's geometry is fixed when it is created, so `--web-size` (or the dashboard, which sends the browser's own grid) decides where it starts.
 
 ### The systemd user service
 

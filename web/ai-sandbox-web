@@ -762,15 +762,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(400, {"error": "size out of range"})
             return
 
-        # zellij collapses a shared session to its smallest client, so a browser
-        # must not impose its own size while a terminal is also attached. When
-        # it is the only client there is nobody to shrink, so the resize is
-        # safe; otherwise the client is told to scale its font instead.
-        count = zellij_client_count(att.container, att.session)
-        if count is not None and count > 1:
-            self._json(409, {"error": "another client is attached",
-                             "cols": att.cols, "rows": att.rows})
-            return
+        # zellij sizes a shared session to its *smallest* client -- measured
+        # against 0.45.1: a 200x50 and a 100x30 client give a 100x29 session,
+        # and the session springs back to 200x50 when the small one leaves.
+        #
+        # Growing is therefore always safe: a client larger than the session
+        # shrinks nobody (a 200x50 plus a 300x80 client stays 200x50). Only
+        # shrinking can drag another client down, and only that needs to wait
+        # for this browser to be alone.
+        #
+        # Refusing to grow was worse than doing nothing: a browser adopts the
+        # geometry recorded when the session was created, so on a session made
+        # by the dashboard it attached at that default and became the smallest
+        # client -- pinning a terminal that was attached at four times the size.
+        if cols < att.cols or rows < att.rows:
+            count = zellij_client_count(att.container, att.session)
+            if count is not None and count > 1:
+                self._json(409, {"error": "another client is attached",
+                                 "cols": att.cols, "rows": att.rows})
+                return
         try:
             att.set_size(cols, rows)
         except OSError as exc:

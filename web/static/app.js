@@ -112,7 +112,11 @@ $('start').addEventListener('submit', async (e) => {
         cpus: $('cpus').value.trim(),
         memory: $('memory').value.trim(),
         network_off: $('network_off').checked,
-        cols: 120, rows: 32,
+        // The grid this window would give it. A session's geometry is fixed
+        // when it is created, and a hardcoded default made every session
+        // started here 120x32 whatever the window -- then, being the smallest
+        // client, it pinned any terminal attached later to that size too.
+        ...windowGrid(null),
       }),
     });
     $('dir').value = '';
@@ -141,6 +145,20 @@ function cellSize() {
   const h = Math.ceil(BASE_FONT * 1.2);
   probe.remove();
   return { w, h };
+}
+
+// The cell grid this window would give a terminal. `box` is the element the
+// terminal will live in, or null before there is one (the start form needs the
+// same answer to size a session it is about to create).
+function windowGrid(box) {
+  const cell = cellSize();
+  const rect = box ? box.getBoundingClientRect() : null;
+  const width = (rect && rect.width) || (document.documentElement.clientWidth - 24);
+  const height = (rect && rect.height) || (document.documentElement.clientHeight - 96);
+  return {
+    cols: Math.max(40, Math.min(500, Math.floor(width / cell.w) - 1)),
+    rows: Math.max(10, Math.min(200, Math.floor(height / cell.h) - 1)),
+  };
 }
 
 function rescale() {
@@ -178,10 +196,7 @@ function setZoom(value) {
 
 async function tryResize() {
   if (!state.term || !state.attachId) return;
-  const cell = cellSize();
-  const stage = $('term-stage').getBoundingClientRect();
-  const cols = Math.max(40, Math.floor(stage.width / cell.w) - 1);
-  const rows = Math.max(10, Math.floor(stage.height / cell.h) - 1);
+  const { cols, rows } = windowGrid($('term-stage'));
   if (cols === state.term.cols && rows === state.term.rows) { rescale(); return; }
   try {
     await apiJson(`/api/attach/${state.attachId}/resize`, {
@@ -190,15 +205,19 @@ async function tryResize() {
       body: JSON.stringify({ cols, rows }),
     });
     state.term.resize(cols, rows);
-    $('term-status').textContent = 'Sole client — terminal sized to this window.';
+    state.zoom = null;
+    $('term-status').textContent = `Session sized to ${cols}x${rows}.`;
   } catch (err) {
     // 409: another client is attached, so adopt the session's size and scale.
     // Say what the numbers are: a session started from a very wide terminal is
     // unreadable here at fit scale, and the way out is the zoom control, a
     // smaller terminal, or detaching the other client.
+    // Only a *shrink* is refused now: growing cannot drag another client down,
+    // since zellij sizes the session to its smallest client.
     $('term-status').textContent =
       `Another client is attached — the session stays ${state.term.cols}x${state.term.rows}` +
-      ` while this window fits ${cols}x${rows}. Use the zoom control, or detach the other client.`;
+      ` and will not shrink to this window's ${cols}x${rows} while that client is there.` +
+      ' Use the zoom control, or detach it.';
   }
   rescale();
 }

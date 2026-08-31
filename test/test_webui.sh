@@ -491,12 +491,17 @@ test_dual_attach() {
     local both
     both="$(wait_for_clients "$name" atleast 2)"
 
-    # zellij collapses a shared session to its smallest client, so a browser
-    # must not impose its own size while a terminal is attached.
-    local resize
-    resize="$(status_of POST "/api/attach/${attach_id}/resize" \
+    # zellij sizes a shared session to its smallest client, so with a terminal
+    # attached the browser may grow -- that shrinks nobody -- but must not
+    # shrink, which would drag the terminal down with it. The session was made
+    # at 100x30, so the first is a grow and the second a shrink.
+    local grow shrink
+    grow="$(status_of POST "/api/attach/${attach_id}/resize" \
         -H "Authorization: Bearer ${TOKEN}" -H 'X-AI-Sandbox: 1' \
         -H 'Content-Type: application/json' -d '{"cols":200,"rows":60}')"
+    shrink="$(status_of POST "/api/attach/${attach_id}/resize" \
+        -H "Authorization: Bearer ${TOKEN}" -H 'X-AI-Sandbox: 1' \
+        -H 'Content-Type: application/json' -d '{"cols":60,"rows":20}')"
 
     # The dashboard has to notice the closed stream and tear its PTY down; that
     # is the phantom-client leak this whole test exists to catch, so wait for it
@@ -517,10 +522,11 @@ test_dual_attach() {
     local alive="no"
     podman container exists "sandbox-${name}" 2>/dev/null && alive="yes"
 
-    if [[ "$both" -ge 2 && "$resize" == 409 && "$after_browser" -lt "$both" && "$alive" == yes ]]; then
+    if [[ "$both" -ge 2 && "$grow" == 200 && "$shrink" == 409 &&
+          "$after_browser" -lt "$both" && "$alive" == yes ]]; then
         pass
     else
-        fail "clients=${both} resize=${resize} after=${after_browser} alive=${alive} attachment=${dropped}"
+        fail "clients=${both} grow=${grow} shrink=${shrink} after=${after_browser} alive=${alive} attachment=${dropped}"
     fi
 }
 
