@@ -110,6 +110,42 @@ cpu_quota_supported() {
         grep -qw cpu "$(dirname "${base}")/cgroup.controllers" 2>/dev/null
 }
 
+# Rewrite the foreground `podman run` command in CMD for a detached start and
+# run it, echoing the container ID.
+#
+#   $1  keep_rm       whether --rm survives.  The BPF-only path drops it because
+#                     its EXIT trap does an explicit `podman rm -f` that --rm
+#                     would race; the web path keeps it so podman's own cleanup
+#                     removes the container when the agent exits, which still
+#                     works after this script has gone away.
+#   $2  detach_flags  inserted after `run`: -dit for the BPF path, which then
+#                     reattaches with `podman attach`, or -d for the web path,
+#                     which does not attach to PID 1 at all.
+start_detached() {
+    local keep_rm="$1" detach_flags="$2" arg
+    local -a cmd=()
+
+    for arg in "${CMD[@]}"; do
+        case "$arg" in
+            --rm)
+                if [[ "$keep_rm" == true ]]; then
+                    cmd+=("$arg")
+                fi
+                continue
+                ;;
+            -it|-i|-t)
+                continue
+                ;;
+        esac
+        cmd+=("$arg")
+        if [[ "$arg" == "run" ]]; then
+            cmd+=("$detach_flags")
+        fi
+    done
+
+    "${cmd[@]}"
+}
+
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
@@ -608,27 +644,9 @@ echo ""
 if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     # === BPF BLOCKING MODE ===
 
-    # Replace --rm and -it with -dit for background run with TTY+stdin
-    CMD_BG=()
-    for arg in "${CMD[@]}"; do
-        case "$arg" in
-            --rm) continue ;;
-            -it)  continue ;;
-            -i)   continue ;;
-            -t)   continue ;;
-            *)    CMD_BG+=("$arg") ;;
-        esac
-    done
-    CMD_FINAL=()
-    for arg in "${CMD_BG[@]}"; do
-        CMD_FINAL+=("$arg")
-        if [[ "$arg" == "run" ]]; then
-            CMD_FINAL+=("-dit")
-        fi
-    done
-
-    # Start container in background
-    CONTAINER_ID=$("${CMD_FINAL[@]}")
+    # Start container in background, keeping --rm off so the EXIT trap owns
+    # removal, and -dit so `podman attach` below gets a TTY and stdin.
+    CONTAINER_ID=$(start_detached false -dit)
     if [[ $? -ne 0 || -z "$CONTAINER_ID" ]]; then
         echo -e "${RED}Error: failed to start container in background${NC}" >&2
         exit 1
