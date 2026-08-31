@@ -252,6 +252,31 @@ client_count() {
         tail -n +2 | grep -c . || true
 }
 
+# Wait up to 20s for the client count to reach `atleast N` or drop `below N`,
+# then echo whatever it ended up being.
+#
+# Polling rather than sleeping: attaching and detaching are not instantaneous
+# on either side -- the dashboard notices a closed browser within a second but
+# then has to signal `podman exec` and let zellij drop the client -- and a fixed
+# sleep here measures the machine's load as much as the code's behaviour.
+wait_for_clients() {
+    local name="$1" mode="$2" want="$3" i n=0 ok=false
+    for ((i = 0; i < 40; i++)); do
+        n="$(client_count "$name")"
+        case "$mode" in
+            atleast) [[ "$n" -ge "$want" ]] && ok=true ;;
+            below)   [[ "$n" -lt "$want" ]] && ok=true ;;
+        esac
+        if [[ "$ok" == true ]]; then
+            echo "$n"
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "$n"
+    return 1
+}
+
 # --- Tests -------------------------------------------------------------------
 
 # A session started without --web must be invisible to the web layer, not
@@ -340,27 +365,43 @@ test_start_rejects_unknown_agent() {
 }
 
 # The real script's own output: `ai-sandbox --web` must produce the opt-in
-# label set, and the dashboard must pick the session up from it.
+# label set. That the dashboard then picks such a session up is
+# test_web_session_listed's job, asserted there against a session that stays
+# up rather than here against one racing its own teardown.
 test_web_session_labels() {
-    run_test "ai-sandbox --web labels the container and the dashboard sees it"
+    run_test "ai-sandbox --web labels the container"
 
-    local name="wtr$$"
+    local name="wtr$$" out="${STAGING}/ai-sandbox-start.log" labels="" i
+    # Launched in the background and watched from the first moment, because the
+    # agent here is `--version`: it prints and exits, and --rm then takes the
+    # container away. ai-sandbox itself waits for the zellij session before it
+    # returns, so inspecting after it returns loses that race every time -- the
+    # old blind SKIP was this, not a slow machine.
     "$AI_SANDBOX" "$TEST_AGENT" "$WORK_DIR" \
         --web --web-name "$name" --web-size 111x33 \
-        --network-off --non-interactive -- --version >/dev/null 2>&1 || true
+        --network-off --non-interactive -- --version >"$out" 2>&1 &
+    local pid=$!
 
-    # The agent exits at once, so read the labels before --rm takes it away.
-    local labels listed
-    labels="$(podman inspect --format \
-        '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}/{{index .Config.Labels "ai-sandbox.cols"}}' \
-        "sandbox-${name}" 2>/dev/null || true)"
-    listed="$(web GET /api/sessions || true)"
+    for ((i = 0; i < 400; i++)); do
+        labels="$(podman inspect --format \
+            '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}/{{index .Config.Labels "ai-sandbox.cols"}}' \
+            "sandbox-${name}" 2>/dev/null || true)"
+        [[ -n "$labels" ]] && break
+        # Nothing more is coming once ai-sandbox has exited without creating it.
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+    done
+
+    wait "$pid" 2>/dev/null
     teardown_session "$name"
 
-    if [[ "$labels" == "1/${name}/111" ]] && grep -q "$name" <<<"$listed"; then
+    if [[ "$labels" == "1/${name}/111" ]]; then
         pass
+    elif grep -qi "not set and running non-interactively" "$out" 2>/dev/null; then
+        skip "no ${TEST_AGENT} credentials configured on this host"
     elif [[ -z "$labels" ]]; then
-        skip "session exited before it could be inspected"
+        # Never a bare skip: say what the script actually complained about.
+        fail "no container: $(tr '\n' ' ' <"$out" | tail -c 160)"
     else
         fail "labels=${labels}"
     fi
@@ -400,7 +441,7 @@ test_dual_attach() {
     # would make this test quietly measure one client instead of two.
     podman exec -it "sandbox-${name}" zellij attach "$name" >/dev/null 2>&1 &
     local pid_a=$!
-    sleep 4
+    wait_for_clients "$name" atleast 1 >/dev/null
 
     # Client B: the browser, through the dashboard's own PTY.
     local attach_id
@@ -415,10 +456,9 @@ test_dual_attach() {
     curl -s -N -H "Authorization: Bearer ${TOKEN}" \
         "http://127.0.0.1:${WEB_PORT}/api/attach/${attach_id}/stream" >/dev/null 2>&1 &
     local pid_stream=$!
-    sleep 3
 
     local both
-    both="$(client_count "$name")"
+    both="$(wait_for_clients "$name" atleast 2)"
 
     # zellij collapses a shared session to its smallest client, so a browser
     # must not impose its own size while a terminal is attached.
@@ -427,10 +467,19 @@ test_dual_attach() {
         -H "Authorization: Bearer ${TOKEN}" -H 'X-AI-Sandbox: 1' \
         -H 'Content-Type: application/json' -d '{"cols":200,"rows":60}')"
 
+    # The dashboard has to notice the closed stream and tear its PTY down; that
+    # is the phantom-client leak this whole test exists to catch, so wait for it
+    # to happen rather than sampling once.
     kill "$pid_stream" 2>/dev/null || true
-    sleep 4
     local after_browser
-    after_browser="$(client_count "$name")"
+    after_browser="$(wait_for_clients "$name" below "$both")"
+
+    # Which side failed, if it did: 404 means the dashboard dropped the
+    # attachment and the leftover client is inside the container, 200 means it
+    # never noticed the browser go away at all.
+    local dropped
+    dropped="$(status_of GET "/api/attach/${attach_id}/stream" \
+        -H "Authorization: Bearer ${TOKEN}" --max-time 2)"
 
     kill "$pid_a" 2>/dev/null || true
     sleep 2
@@ -440,7 +489,7 @@ test_dual_attach() {
     if [[ "$both" -ge 2 && "$resize" == 409 && "$after_browser" -lt "$both" && "$alive" == yes ]]; then
         pass
     else
-        fail "clients=${both} resize=${resize} after=${after_browser} alive=${alive}"
+        fail "clients=${both} resize=${resize} after=${after_browser} alive=${alive} attachment=${dropped}"
     fi
 }
 
@@ -647,6 +696,15 @@ test_session_cleanup
 test_no_prompt_without_tty
 
 echo ""
+if [[ $FAIL -gt 0 && -s "${STAGING}/web.log" ]]; then
+    # cleanup() removes $STAGING on exit, and the dashboard's own log is where
+    # a podman or attach failure explains itself. Print it while it still exists.
+    echo "--- dashboard log (last 20 lines) ---"
+    tail -n 20 "${STAGING}/web.log"
+    echo "-------------------------------------"
+    echo ""
+fi
+
 echo "=============================="
 echo -e "  Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "=============================="
