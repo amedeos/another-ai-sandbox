@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-sandbox</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="centered">
+  <form class="card login" id="login">
+    <h1>ai-sandbox</h1>
+    <p class="muted">Paste the access token from
+      <code>~/.config/ai-sandbox/web-token</code>.</p>
+    <input type="password" id="token" placeholder="access token" autocomplete="off" autofocus>
+    <button type="submit">Unlock</button>
+  </form>
+<script>
+document.getElementById('login').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var t = document.getElementById('token').value.trim();
+  if (t) { window.location = '/?t=' + encodeURIComponent(t); }
+});
+</script>
+</body>
+</html>

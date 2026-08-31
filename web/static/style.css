@@ -1,0 +1,78 @@
+:root {
+  color-scheme: dark;
+  --bg: #12141a;
+  --panel: #191c24;
+  --line: #2a2f3a;
+  --fg: #d7dce5;
+  --muted: #838b9c;
+  --accent: #6aa9ff;
+  --danger: #ff6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+body.centered { display: grid; place-items: center; min-height: 100vh; }
+
+header {
+  display: flex; align-items: center; gap: .75rem;
+  padding: .6rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.brand { font-weight: 600; letter-spacing: .02em; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+.error { color: var(--danger); white-space: pre-wrap; }
+
+main { padding: 1rem; display: grid; gap: 1rem; max-width: 60rem; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.card h1, .card h2 { margin: 0 0 .75rem; font-size: 1rem; }
+.login { width: min(24rem, 92vw); display: grid; gap: .75rem; }
+
+.sessions { display: grid; gap: .5rem; }
+.session {
+  display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+  padding: .6rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.session .name { font-weight: 600; }
+.session .meta { color: var(--muted); font-size: .85em; }
+
+.grid {
+  display: grid; gap: .75rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  margin-bottom: .75rem;
+}
+label { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
+label.check { display: flex; align-items: center; gap: .5rem; }
+input, select {
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: .45rem .6rem; font: inherit; min-width: 0;
+}
+button {
+  background: var(--accent); color: #08121f; border: 0;
+  border-radius: 6px; padding: .45rem .9rem;
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+button.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--line); }
+button:disabled { opacity: .5; cursor: default; }
+
+/* The terminal renders at a fixed cell grid -- the session's own geometry --
+   and is scaled to fit the viewport, so the browser never forces a smaller
+   size on a terminal client sharing the session. */
+#term-view { max-width: none; padding: .5rem; }
+#term-stage { overflow: auto; }
+#term-scale { transform-origin: top left; width: max-content; }
+.status { margin: .4rem 0 0; }

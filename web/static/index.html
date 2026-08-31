@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-sandbox</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <span class="brand">ai-sandbox</span>
+    <span id="crumb" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="back" class="ghost" hidden>&larr; Sessions</button>
+  </header>
+
+  <main id="list-view">
+    <section class="card">
+      <h2>Running sessions</h2>
+      <div id="sessions" class="sessions"><p class="muted">Loading…</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Start a session</h2>
+      <form id="start">
+        <div class="grid">
+          <label>Agent
+            <select id="agent">
+              <option value="claude">claude</option>
+              <option value="claude-vertex">claude-vertex</option>
+              <option value="codex">codex</option>
+              <option value="cursor">cursor</option>
+              <option value="opencode">opencode</option>
+            </select>
+          </label>
+          <label>Directory
+            <input id="dir" placeholder="/home/you/projects/repo" required>
+          </label>
+          <label>Name <span class="muted">(optional)</span>
+            <input id="name" placeholder="auto">
+          </label>
+          <label>CPUs
+            <input id="cpus" placeholder="2">
+          </label>
+          <label>Memory
+            <input id="memory" placeholder="4g">
+          </label>
+          <label class="check">
+            <input type="checkbox" id="network_off"> Disable network
+          </label>
+        </div>
+        <button type="submit">Start</button>
+        <p id="start-error" class="error" hidden></p>
+      </form>
+    </section>
+  </main>
+
+  <main id="term-view" hidden>
+    <div id="term-stage">
+      <div id="term-scale"><div id="term"></div></div>
+    </div>
+    <p id="term-status" class="muted status"></p>
+  </main>
+
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
