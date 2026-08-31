@@ -455,7 +455,9 @@ Pasting an image into the browser terminal uploads it into the session's `/tmp` 
 
 zellij sizes a shared session to its **smallest** attached client — measured against 0.45.1: a 200x50 client and a 100x30 one give a 100x29 session, and it springs back to 200x50 when the small client leaves. A client *larger* than the session shrinks nobody.
 
-So the browser may **grow** the session freely, and that is what it does on attach: it adopts the geometry recorded on the container, then asks for its own window's grid. **Shrinking** is what would drag another client down, so a request for less than the browser's current size is refused with `409` while anyone else is attached; the browser then scales the rendered grid to fit, and the zoom control in the header is there to read a session too wide for the window. Zoom is presentation only and never changes the session's geometry.
+So the browser may **grow** the session freely, and that is what it does on attach: it adopts the geometry recorded on the container, then asks for its own window's grid. **Shrinking** is what would drag another client down, so a request for less than the browser's current size is refused with `409` while anyone else is attached; the browser then scales the rendered grid to fit the window instead.
+
+The zoom control in the header changes the type size and asks the session for the grid that now fits — larger type, fewer columns, as in any terminal emulator. When the session cannot follow because another client is attached, the grid stays as it is and is painted at the chosen size, scrolling if it no longer fits.
 
 Two consequences are worth knowing: if you resize your *terminal* while a browser is attached, zellij still reflows to the smaller of the two, and there is no fix for that at this layer; and a session's geometry is fixed when it is created, so `--web-size` (or the dashboard, which sends the browser's own grid) decides where it starts.
 

@@ -14,8 +14,14 @@ const BASE_FONT = 14;
 const INPUT_FLUSH_MS = 12;
 
 const $ = (id) => document.getElementById(id);
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 2.5;
+// fontScale is the reader's own zoom, applied to the font rather than to the
+// painted image: bigger type means fewer columns fit, exactly as in a terminal
+// emulator, and the session is asked to match. A CSS transform is only the
+// fallback for when it refuses.
 const state = { term: null, attachId: null, source: null, session: null, pending: [],
-                zoom: null, fit: 1 };  // zoom: null = fit the window
+                fontScale: 1 };
 
 async function api(path, options = {}) {
   const opts = Object.assign({ headers: {} }, options);
@@ -132,17 +138,22 @@ $('start').addEventListener('submit', async (e) => {
 
 // --- Terminal --------------------------------------------------------------
 
+function fontPx() {
+  return Math.max(6, Math.round(BASE_FONT * state.fontScale));
+}
+
 function cellSize() {
-  // Measure one cell at the base font size, so an ideal column/row count for
-  // the viewport can be computed without reaching into xterm internals.
+  // Measure one cell at the font actually in use, so an ideal column/row count
+  // for the window can be computed without reaching into xterm internals.
+  const px = fontPx();
   const probe = document.createElement('span');
   probe.style.cssText =
-    `position:absolute;visibility:hidden;font:${BASE_FONT}px ui-monospace,` +
+    `position:absolute;visibility:hidden;font:${px}px ui-monospace,` +
     'SFMono-Regular,Menlo,Consolas,monospace;white-space:pre';
   probe.textContent = 'M'.repeat(100);
   document.body.append(probe);
   const w = probe.getBoundingClientRect().width / 100;
-  const h = Math.ceil(BASE_FONT * 1.2);
+  const h = Math.ceil(px * 1.2);
   probe.remove();
   return { w, h };
 }
@@ -167,31 +178,34 @@ function rescale() {
   scaleBox.style.transform = 'none';
   const natural = scaleBox.getBoundingClientRect();
   if (!natural.width || !natural.height) return;
-  const avail = stage.getBoundingClientRect();
-  state.fit = Math.min(avail.width / natural.width,
-                       avail.height / natural.height, 1.75);
-  // Never shrink past legibility on its own; below this the stage scrolls, and
-  // the zoom control is there for a session too wide to fit at a readable size.
-  const scale = state.zoom || Math.max(state.fit, 0.45);
+
+  // Squeeze the grid into the window only while the reader has not chosen a
+  // size of their own. A session another client keeps wider than this window
+  // cannot be resized down, and it has to be shown somehow; but once they have
+  // zoomed, honouring that beats fitting, and the stage scrolls.
+  let scale = 1;
+  if (state.fontScale === 1) {
+    const avail = stage.getBoundingClientRect();
+    scale = Math.max(0.45, Math.min(avail.width / natural.width,
+                                    avail.height / natural.height, 1));
+  }
   scaleBox.style.transform = `scale(${scale})`;
   // A transform leaves layout size untouched, so the stage would scroll across
   // the unscaled grid; give the sizer the dimensions actually painted.
   const sizer = $('term-sizer');
   sizer.style.width = `${Math.ceil(natural.width * scale)}px`;
   sizer.style.height = `${Math.ceil(natural.height * scale)}px`;
-  $('zoom-level').textContent = state.zoom ? `${Math.round(scale * 100)}%` : 'fit';
+  $('zoom-level').textContent = `${Math.round(state.fontScale * 100)}%`;
 }
 
-// Zoom is a display control only: it never changes the session's geometry, so
-// it is safe while another client is attached -- which is exactly when a wide
-// session cannot be resized down to something readable.
-function setZoom(value) {
-  if (value === null) {
-    state.zoom = null;
-  } else {
-    state.zoom = Math.min(2, Math.max(0.3, Math.round(value * 20) / 20));
-  }
-  rescale();
+// Zoom changes the type size and then asks the session for the grid that now
+// fits the window -- the terminal-emulator behaviour, where larger type means
+// fewer columns. The session may refuse (another client would be dragged down
+// with it), and then rescale() falls back to painting the grid we have.
+async function setZoom(scale) {
+  state.fontScale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(scale * 20) / 20));
+  if (state.term) state.term.options.fontSize = fontPx();
+  await tryResize();
 }
 
 async function tryResize() {
@@ -205,7 +219,6 @@ async function tryResize() {
       body: JSON.stringify({ cols, rows }),
     });
     state.term.resize(cols, rows);
-    state.zoom = null;
     $('term-status').textContent = `Session sized to ${cols}x${rows}.`;
   } catch (err) {
     // 409: another client is attached, so adopt the session's size and scale.
@@ -266,13 +279,13 @@ async function openTerminal(session) {
   $('term-view').hidden = false;
   $('back').hidden = false;
   $('zoom').hidden = false;
-  state.zoom = null;
   $('crumb').textContent = `${session.session} · ${session.agent}`;
 
+  state.fontScale = 1;
   const term = new Terminal({
     cols: info.cols,
     rows: info.rows,
-    fontSize: BASE_FONT,
+    fontSize: fontPx(),
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
     cursorBlink: true,
     allowProposedApi: true,
@@ -334,9 +347,9 @@ function closeTerminal() {
 }
 
 $('back').addEventListener('click', closeTerminal);
-$('zoom-in').addEventListener('click', () => setZoom((state.zoom || state.fit) * 1.25));
-$('zoom-out').addEventListener('click', () => setZoom((state.zoom || state.fit) / 1.25));
-$('zoom-fit').addEventListener('click', () => setZoom(null));
+$('zoom-in').addEventListener('click', () => setZoom(state.fontScale * 1.15));
+$('zoom-out').addEventListener('click', () => setZoom(state.fontScale / 1.15));
+$('zoom-fit').addEventListener('click', () => setZoom(1));
 window.addEventListener('beforeunload', () => {
   if (state.attachId) {
     api(`/api/attach/${state.attachId}`, { method: 'DELETE', keepalive: true }).catch(() => {});
