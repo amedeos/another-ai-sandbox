@@ -322,12 +322,54 @@ do_attach() {
     fi
 }
 
+# Container ids of every running --web session, one per line.
+#
+# `podman ps -q` and an inspect each, rather than one --format template over
+# the listing: `podman ps` template fields are Go struct names, not the JSON
+# keys the same output is documented under, and a single wrong name fails the
+# whole invocation -- which, with the exit status unchecked, reads as "no
+# sessions running" rather than as an error. Nothing here interprets a
+# template, and inspect is what the attach path already depends on.
+web_container_ids() {
+    local raw
+    if ! raw="$("${BUILDER}" ps --filter label=ai-sandbox.web=1 -q 2>&1)"; then
+        echo -e "${RED}Error: could not list containers:${NC} ${raw}" >&2
+        return 1
+    fi
+    [[ -n "$raw" ]] && printf '%s\n' "$raw"
+    return 0
+}
+
 # ai-sandbox list
 do_list() {
-    local out
-    out="$("${BUILDER}" ps --filter label=ai-sandbox.web=1 --format \
-        '{{index .Labels "ai-sandbox.session"}}\t{{index .Labels "ai-sandbox.agent"}}\t{{index .Labels "ai-sandbox.cols"}}x{{index .Labels "ai-sandbox.rows"}}\t{{index .Labels "ai-sandbox.network"}}\t{{index .Labels "ai-sandbox.workdir"}}' \
-        2>/dev/null || true)"
+    local -a ids
+    local raw id out="" session agent cols rows network workdir
+
+    # Captured, not piped from a process substitution: that would report
+    # mapfile's exit status and swallow podman's, which is the whole failure
+    # this function was rewritten to stop repeating.
+    raw="$(web_container_ids)" || return 1
+    mapfile -t ids <<<"$raw"
+
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        # One field per line: a tab separator inside a Go template is a literal
+        # backslash-t unless podman normalises it, and that is exactly the kind
+        # of assumption this function exists to avoid.
+        { read -r session; read -r agent; read -r cols; read -r rows
+          read -r network; read -r workdir
+        } < <("${BUILDER}" inspect --format \
+            '{{index .Config.Labels "ai-sandbox.session"}}
+{{index .Config.Labels "ai-sandbox.agent"}}
+{{index .Config.Labels "ai-sandbox.cols"}}
+{{index .Config.Labels "ai-sandbox.rows"}}
+{{index .Config.Labels "ai-sandbox.network"}}
+{{index .Config.Labels "ai-sandbox.workdir"}}' "$id" 2>/dev/null) || true
+        [[ -n "$session" ]] || continue
+        out+="$(printf '  %-26s %-14s %-9s %-7s %s' \
+                "$session" "$agent" "${cols}x${rows}" "$network" "$workdir")"$'\n'
+        session=""
+    done
 
     if [[ -z "$out" ]]; then
         echo "No web sessions running."
@@ -336,8 +378,7 @@ do_list() {
     fi
 
     echo -e "${CYAN}Web sessions${NC}"
-    printf '%s\n' "$out" | awk -F'\t' \
-        '{ printf "  %-26s %-14s %-9s %-7s %s\n", $1, $2, $3, $4, $5 }'
+    printf '%s' "$out"
 }
 
 # ai-sandbox stop <session>|--all
@@ -346,8 +387,15 @@ do_stop() {
     local -a sessions
 
     if [[ "$target" == "--all" ]]; then
-        mapfile -t sessions < <("${BUILDER}" ps --filter label=ai-sandbox.web=1 \
-            --format '{{index .Labels "ai-sandbox.session"}}' 2>/dev/null || true)
+        local id raw
+        raw="$(web_container_ids)" || return 1
+        sessions=()
+        while read -r id; do
+            [[ -n "$id" ]] || continue
+            session="$("${BUILDER}" inspect --format \
+                '{{index .Config.Labels "ai-sandbox.session"}}' "$id" 2>/dev/null)" || continue
+            [[ -n "$session" ]] && sessions+=("$session")
+        done <<<"$raw"
         if [[ ${#sessions[@]} -eq 0 ]]; then
             echo "No web sessions running."
             return 0

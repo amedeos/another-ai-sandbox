@@ -434,6 +434,28 @@ test_web_session_listed() {
     fi
 }
 
+# `ai-sandbox list` and the dashboard have to agree: both read the same opt-in
+# label, and this suite only ever checked the dashboard's half. A listing that
+# silently comes back empty -- a podman call whose failure nobody looked at --
+# looks exactly like "no sessions running".
+test_list_shows_web_session() {
+    run_test "ai-sandbox list shows a running --web session"
+
+    local name="wt1$$"
+    if ! podman container exists "sandbox-${name}" 2>/dev/null; then
+        skip "no session"
+        return
+    fi
+
+    local out rc=0
+    out="$("$AI_SANDBOX" list 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "$name" <<<"$out" && grep -q "100x30" <<<"$out"; then
+        pass
+    else
+        fail "rc=${rc} out=$(tr '\n' ' ' <<<"$out" | tail -c 160)"
+    fi
+}
+
 # The core property: two clients on one session, and losing one loses neither
 # the session nor the other client.
 test_dual_attach() {
@@ -696,6 +718,7 @@ test_start_rejects_bad_directory
 test_start_rejects_unknown_agent
 test_web_session_labels
 test_web_session_listed
+test_list_shows_web_session
 test_dual_attach
 test_paste_image
 test_attach_refuses_non_web_container
