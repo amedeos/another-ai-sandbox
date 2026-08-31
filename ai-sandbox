@@ -675,8 +675,11 @@ if [[ "$WEB_MODE" == true ]]; then
     SESSION="${OPT_WEB_NAME:-${AI_SANDBOX_SESSION:-}}"
     if [[ -z "$SESSION" ]]; then
         # A short random suffix keeps concurrent sessions on the same directory
-        # from colliding without making the name unreadable.
-        SESSION="${AGENT}-${MOUNT_NAMES[0]}-$(tr -dc 'a-z0-9' </dev/urandom | head -c 4)"
+        # from colliding without making the name unreadable.  $RANDOM rather
+        # than a /dev/urandom pipeline: `tr ... | head -c 4` leaves tr writing
+        # to a closed pipe, and under `set -o pipefail` that SIGPIPE takes the
+        # whole script down.  This is collision avoidance, not a secret.
+        SESSION="${AGENT}-${MOUNT_NAMES[0]}-$(printf '%04x' "$((RANDOM % 65536))")"
         SESSION="${SESSION:0:48}"
     fi
     validate_session_name "$SESSION"
