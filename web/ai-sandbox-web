@@ -247,6 +247,86 @@ def zellij_client_count(container, session):
     return max(0, len(lines) - 1)
 
 
+MAX_DIR_ENTRIES = 500
+
+
+def inside_roots(path, allow_root_itself):
+    """Is `path` within the directories a session may be mounted from?
+
+    Mounting a root itself is refused -- a whole home directory should not be
+    handed to an agent by accident -- but browsing it has to be allowed, or
+    there is no way to reach anything below it.
+    """
+    for root in ALLOWED_ROOTS:
+        if path == root:
+            if allow_root_itself:
+                return True
+            continue
+        if root in path.parents:
+            return True
+    return False
+
+
+def complete_dirs(typed):
+    """Immediate subdirectories matching what the user has typed so far.
+
+    One level, never a walk: the cost of a request is one `scandir` of the
+    directory being looked at, whatever the size of the tree below it.
+
+    Matching ignores case, because that is a typing convenience; the paths
+    returned are the exact names on disk, because resolving them is not. On a
+    case-sensitive filesystem `~/Repos` and `~/repos` are two directories, and
+    it is not this function's place to choose between them -- so a match that
+    also agrees on case sorts first.
+    """
+    expanded = os.path.expanduser(typed or str(ALLOWED_ROOTS[0]) + "/")
+    # Split the string rather than asking pathlib for .parent/.name: pathlib
+    # normalises a trailing "." away, and "." is exactly what someone types to
+    # ask for hidden directories.
+    if expanded.endswith("/"):
+        parent_str, partial = expanded, ""
+    else:
+        parent_str, _, partial = expanded.rpartition("/")
+    parent = Path(parent_str or "/")
+
+    try:
+        parent = parent.resolve()
+    except OSError:
+        return None, "no such directory"
+    if not parent.is_dir():
+        return None, "no such directory"
+    if not inside_roots(parent, allow_root_itself=True):
+        allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
+        return None, f"outside the allowed roots: {allowed}"
+
+    lowered = partial.lower()
+    names = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                name = entry.name
+                # Dotfiles only once the user has shown interest in them.
+                if name.startswith(".") and not partial.startswith("."):
+                    continue
+                if not name.lower().startswith(lowered):
+                    continue
+                try:
+                    if entry.is_dir():          # follows symlinks, as a mount would
+                        names.append(name)
+                except OSError:
+                    continue
+    except OSError as exc:
+        return None, f"could not read the directory: {exc.strerror or exc}"
+
+    names.sort(key=lambda n: (not n.startswith(partial), n.lower(), n))
+    truncated = len(names) > MAX_DIR_ENTRIES
+    return {
+        "parent": str(parent),
+        "dirs": [str(parent / n) for n in names[:MAX_DIR_ENTRIES]],
+        "truncated": truncated,
+    }, None
+
+
 def validate_start_spec(body):
     """Turn a request body into an argv for ai-sandbox, or raise ValueError.
 
@@ -273,7 +353,7 @@ def validate_start_spec(body):
             raise ValueError(f"not a directory: {entry}")
         # Must be strictly inside an allowed root: the root itself is refused,
         # so a whole home directory cannot be handed to an agent by accident.
-        if not any(path != root and root in path.parents for root in ALLOWED_ROOTS):
+        if not inside_roots(path, allow_root_itself=False):
             allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
             raise ValueError(f"directory must be below one of: {allowed}")
         resolved.append(path)
@@ -621,6 +701,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self._guard():
                 return
             self._json(200, {"sessions": list_sessions()})
+            return
+
+        if path == "/api/dirs":
+            if not self._guard():
+                return
+            typed = (urllib.parse.parse_qs(query).get("path") or [""])[0]
+            if len(typed) > 4096:
+                self._json(400, {"error": "path too long"})
+                return
+            result, error = complete_dirs(typed)
+            if error:
+                self._json(403 if "allowed roots" in error else 404, {"error": error})
+                return
+            self._json(200, result)
             return
 
         match = re.fullmatch(r"/api/attach/([A-Za-z0-9_-]{1,64})/stream", path)

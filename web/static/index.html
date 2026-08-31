@@ -41,7 +41,9 @@
             </select>
           </label>
           <label>Directory
-            <input id="dir" placeholder="/home/you/projects/repo" required>
+            <input id="dir" placeholder="/home/you/projects/repo" required
+                   list="dir-options" autocomplete="off" spellcheck="false">
+            <datalist id="dir-options"></datalist>
           </label>
           <label>More directories <span class="muted">(one per line)</span>
             <textarea id="dirs-extra" rows="2"

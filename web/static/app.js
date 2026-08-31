@@ -105,6 +105,38 @@ async function refresh() {
 
 const lines = (id) => $(id).value.split('\n').map((v) => v.trim()).filter(Boolean);
 
+// Directory completion, one level per request: the server lists the immediate
+// children of the directory being typed in and nothing below them, so the cost
+// never depends on the size of the tree. The browser's own datalist dropdown
+// does the presenting -- matching ignores case, but what lands in the field is
+// the exact name on disk, because that is what gets mounted.
+let dirTimer = null;
+let dirCache = '';
+async function completeDirs() {
+  const typed = $('dir').value;
+  const upto = typed.slice(0, typed.lastIndexOf('/') + 1);
+  if (upto === dirCache) return;      // same directory, the list still applies
+  dirCache = upto;
+  let result;
+  try {
+    result = await apiJson(`/api/dirs?path=${encodeURIComponent(typed)}`);
+  } catch (err) {
+    return;                           // outside the roots, or gone: no suggestions
+  }
+  const list = $('dir-options');
+  list.replaceChildren(...result.dirs.map((d) => {
+    const option = document.createElement('option');
+    option.value = d;
+    return option;
+  }));
+}
+
+$('dir').addEventListener('input', () => {
+  window.clearTimeout(dirTimer);
+  dirTimer = window.setTimeout(completeDirs, 150);
+});
+$('dir').addEventListener('focus', () => { dirCache = ''; completeDirs(); });
+
 $('start').addEventListener('submit', async (e) => {
   e.preventDefault();
   const err = $('start-error');

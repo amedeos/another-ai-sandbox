@@ -205,8 +205,12 @@ start_dashboard() {
     : > "${STAGING}/static/vendor/xterm.js"
     : > "${STAGING}/static/vendor/xterm.css"
 
+    # Confine the dashboard to the test's own directory: the default is $HOME,
+    # and a test that asked the dashboard to mount something needs a root it
+    # controls rather than the developer's home.
     AI_SANDBOX_WEB_DIR="$STAGING" \
     AI_SANDBOX_WEB_TOKEN_FILE="$TOKEN_FILE" \
+    AI_SANDBOX_WEB_ROOTS="$WORK_DIR" \
     AI_SANDBOX_BIN="$AI_SANDBOX" \
         python3 "$WEB_BIN" --addr 127.0.0.1 --port "$WEB_PORT" \
         > "${STAGING}/web.log" 2>&1 &
@@ -364,6 +368,31 @@ test_start_rejects_unknown_agent() {
     fi
 }
 
+# Completion is a filesystem listing driven from the browser, so it has to stay
+# inside the same roots a session may be mounted from -- and stay one level
+# deep, or a request would cost a walk of everything below it.
+test_dirs_completion() {
+    run_test "directory completion lists one level, inside the roots, any case"
+
+    local root sub deep outside
+    root="$(web GET "/api/dirs?path=${WORK_DIR}/")"
+    sub="$(web GET "/api/dirs?path=${WORK_DIR}/Ca")"
+    deep="$(web GET "/api/dirs?path=${WORK_DIR}/proj/")"
+    outside="$(web GET "/api/dirs?path=/etc")"
+
+    # CaseTest matched from the wrong case, but offered under its real name;
+    # nested/ is one level below proj/ and must not appear in the root listing.
+    if grep -q '"'"${WORK_DIR}/proj"'"' <<<"$root" &&
+       grep -q "CaseTest" <<<"$sub" &&
+       ! grep -q "nested" <<<"$root" &&
+       grep -q "nested" <<<"$deep" &&
+       grep -q "allowed roots" <<<"$outside"; then
+        pass
+    else
+        fail "root=${root} sub=${sub} deep=${deep} outside=${outside}"
+    fi
+}
+
 # The real script's own output: `ai-sandbox --web` must produce the opt-in
 # label set. That the dashboard then picks such a session up is
 # test_web_session_listed's job, asserted there against a session that stays
@@ -377,7 +406,7 @@ test_start_rejects_bad_block_rule() {
     local before after body
     before="$(podman ps -q | wc -l)"
     body="$(web POST /api/sessions -H 'Content-Type: application/json' \
-        -d "{\"agent\":\"claude\",\"dirs\":[\"${WORK_DIR}\"],\"blocked\":[\"git; rm -rf /\"]}")"
+        -d "{\"agent\":\"claude\",\"dirs\":[\"${WORK_DIR}/proj\"],\"blocked\":[\"git; rm -rf /\"]}")"
     after="$(podman ps -q | wc -l)"
 
     if grep -q 'invalid block rule' <<<"$body" && [[ "$before" == "$after" ]]; then
@@ -728,6 +757,9 @@ trap cleanup EXIT
 check_prerequisites
 
 WORK_DIR="$(mktemp -d)"
+# Fixtures for the completion test: a directory to find, one nested below it to
+# prove the listing stops at one level, and one differing only in case.
+mkdir -p "${WORK_DIR}/proj/nested" "${WORK_DIR}/CaseTest"
 if ! start_dashboard; then
     echo -e "${RED}Could not start the dashboard. Aborting.${NC}"
     exit 1
@@ -742,6 +774,7 @@ test_optin_isolation
 test_start_rejects_bad_directory
 test_start_rejects_unknown_agent
 test_start_rejects_bad_block_rule
+test_dirs_completion
 test_web_session_labels
 test_web_session_listed
 test_list_shows_web_session
