@@ -47,9 +47,9 @@ bash test/test_webui.sh
 
 ## Architecture
 
-There are three main scripts (all Bash) and a BPF subsystem:
+There are three main Bash scripts, one Python script, and a BPF subsystem:
 
-- **`ai-sandbox`** — the user-facing wrapper. Parses arguments, validates auth/images, constructs a `podman run` command with all security flags, and optionally starts the BPF loader for `--block-cmd` rules. Two execution modes: normal (`exec podman run`) and BPF-blocking (starts container in background, resolves its cgroup, launches loader, then `podman attach`).
+- **`ai-sandbox`** — the user-facing wrapper. Parses arguments, validates auth/images, constructs a `podman run` command with all security flags, and optionally starts the BPF loader for `--block-cmd` rules. Three execution modes: normal (`exec podman run`), BPF-blocking (starts the container in the background, resolves its cgroup, launches the loader, then `podman attach`), and web (`--web`: starts detached with `--rm`, then attaches with `podman exec ... zellij attach`, so detaching does not kill the agent). Also dispatches the `attach`/`list`/`stop`/`web` subcommands.
 
 - **`ai-sandbox-build`** — standalone build script. Reads Containerfiles from `~/.local/share/ai-sandbox/` (installed by `install.sh`). Builds base first, then agent images on top.
 
@@ -66,8 +66,8 @@ There are three main scripts (all Bash) and a BPF subsystem:
 ## CI
 
 Two GitHub Actions workflows on push/PR to `main`:
-- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox`; Hadolint on all Containerfiles
-- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image)
+- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` (it is Python and must stay out of the ShellCheck sweep); Hadolint on all Containerfiles
+- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` in the base image, and `ai-sandbox-supervise` passthrough)
 
 ## Git Policy
 
