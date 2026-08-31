@@ -170,6 +170,7 @@ usage() {
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
     echo "      --build [target]    Build container images (all|base|claude|codex|cursor|opencode)"
+    echo "      --non-interactive   Never prompt; fail instead (implied when stdin is not a TTY)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
     echo ""
@@ -193,6 +194,7 @@ OPT_BASE_URL=""
 OPT_NO_API_KEY=false
 OPT_CPUS=""
 OPT_MEMORY=""
+NON_INTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -219,6 +221,7 @@ while [[ $# -gt 0 ]]; do
         --model)      OPT_MODEL="$2"; shift 2 ;;
         --base-url)   OPT_BASE_URL="$2"; shift 2 ;;
         --no-api-key) OPT_NO_API_KEY=true; shift ;;
+        --non-interactive) NON_INTERACTIVE=true; shift ;;
         -v|--verbose) VERBOSE=true; shift ;;
         --)           shift; EXTRA_ARGS=("$@"); break ;;
         -*)           echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
@@ -238,6 +241,13 @@ done
 if [[ -z "$AGENT" ]]; then
     echo -e "${RED}Error: specify an agent (claude|claude-vertex|codex|cursor)${NC}" >&2
     usage
+fi
+
+# Anything that would block on a prompt has to fail instead when there is no
+# terminal to prompt at -- the web dashboard runs this script from a systemd
+# user service, where stdin is /dev/null and a `read` returns empty immediately.
+if [[ ! -t 0 ]]; then
+    NON_INTERACTIVE=true
 fi
 
 if [[ -n "$BLOCKED_COMMANDS" ]]; then
@@ -435,6 +445,11 @@ elif [[ -n "$API_KEY_VAR" && -z "${!API_KEY_VAR:-}" ]]; then
             echo "Or use --no-api-key if --base-url points to an endpoint that doesn't need one"
         fi
         echo ""
+        if [[ "$NON_INTERACTIVE" == true ]]; then
+            echo -e "${RED}Error: ${API_KEY_VAR} not set and running non-interactively.${NC}" >&2
+            echo "Set it in ${ENV_FILE}, which is the only place the web dashboard reads keys from." >&2
+            exit 1
+        fi
         read -rp "Do you want to continue anyway? [y/N] " confirm
         [[ "$confirm" =~ ^[yY]$ ]] || exit 1
     fi
@@ -459,7 +474,15 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
         echo -e "${RED}or set AI_SANDBOX_BPF_LOADER=/path/to/loader.${NC}" >&2
         exit 1
     fi
-    if ! sudo -n true 2>/dev/null && ! sudo -v; then
+    # `sudo -v` prompts for a password, so only reach for it when there is a
+    # terminal to prompt at.
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "${RED}Error: passwordless sudo required for BPF command blocking${NC}" >&2
+            echo -e "${RED}when running non-interactively.${NC}" >&2
+            exit 1
+        fi
+    elif ! sudo -n true 2>/dev/null && ! sudo -v; then
         echo -e "${RED}Error: sudo access required for BPF command blocking.${NC}" >&2
         exit 1
     fi
