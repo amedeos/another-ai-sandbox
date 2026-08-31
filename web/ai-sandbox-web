@@ -32,7 +32,9 @@ import os
 import re
 import secrets
 import select
+import shlex
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -119,23 +121,41 @@ def podman(*args, timeout=20, check=False):
                           timeout=timeout, check=check)
 
 
+def label_int(labels, key, default):
+    """A numeric label, or the default. Labels are attacker-controllable input:
+    anything can set ai-sandbox.cols on a container of its own, and an
+    unhandled ValueError here would take the whole listing down with a 500."""
+    try:
+        return int(labels.get(f"{LABEL_PREFIX}{key}") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def list_sessions():
     """Every running container carrying the opt-in label, with its parameters.
 
     Containers started without --web have no ai-sandbox.* labels at all, so
     they are not merely filtered out here -- there is nothing to filter.
+
+    `--format json` rather than a Go template: template fields are struct
+    names, not the JSON keys they are documented under (`.Id` is the JSON tag
+    of a field actually called `ID`), and one wrong name makes podman fail the
+    whole invocation. That failure used to surface as an empty dashboard,
+    because nothing here looked at the exit status -- hence the log below.
     """
-    fmt = "{{json .Labels}}\t{{.Id}}\t{{.State}}"
-    proc = podman("ps", "--filter", f"label={LABEL_PREFIX}web=1", "--format", fmt)
+    proc = podman("ps", "--filter", f"label={LABEL_PREFIX}web=1", "--format", "json")
+    if proc.returncode != 0:
+        log(f"podman ps failed ({proc.returncode}): {proc.stderr.strip()}")
+        return []
+    try:
+        containers = json.loads(proc.stdout or "[]") or []
+    except json.JSONDecodeError as exc:
+        log(f"could not parse podman ps output: {exc}")
+        return []
+
     sessions = []
-    for line in proc.stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            raw, cid, state = line.split("\t", 2)
-            labels = json.loads(raw) or {}
-        except (ValueError, json.JSONDecodeError):
-            continue
+    for container in containers:
+        labels = container.get("Labels") or {}
         name = labels.get(f"{LABEL_PREFIX}session", "")
         if not SESSION_RE.match(name):
             continue
@@ -149,10 +169,10 @@ def list_sessions():
             "network": labels.get(f"{LABEL_PREFIX}network", ""),
             "blocked": labels.get(f"{LABEL_PREFIX}blocked", ""),
             "created": labels.get(f"{LABEL_PREFIX}created", ""),
-            "cols": int(labels.get(f"{LABEL_PREFIX}cols") or 120),
-            "rows": int(labels.get(f"{LABEL_PREFIX}rows") or 32),
-            "id": cid[:12],
-            "state": state,
+            "cols": label_int(labels, "cols", 120),
+            "rows": label_int(labels, "rows", 32),
+            "id": str(container.get("Id") or "")[:12],
+            "state": str(container.get("State") or ""),
         })
     sessions.sort(key=lambda s: s["created"])
     return sessions
@@ -314,11 +334,18 @@ class Attachment:
 
         self.master, slave = os.openpty()
         self.set_size(cols, rows)
+        # The zellij client records its own pid inside the container, because
+        # that is the only handle this side gets on it: `podman exec` reports
+        # nothing about the process it started, and killing the local client
+        # does not kill it (see close()).
+        self.pidfile = f"/tmp/ai-sandbox-attach-{self.id}.pid"
         self.proc = subprocess.Popen(
             [PODMAN, "exec", "-i", "-t",
              "-e", "TERM=xterm-256color",
              "-e", "COLORTERM=truecolor",
-             container, "zellij", "attach", session],
+             container, "/bin/sh", "-c",
+             (f"echo $$ > {shlex.quote(self.pidfile)}; "
+              f"exec zellij attach {shlex.quote(session)}")],
             stdin=slave, stdout=slave, stderr=slave,
             start_new_session=True, close_fds=True,
         )
@@ -351,8 +378,32 @@ class Attachment:
             if self.closed:
                 return
             self.closed = True
-        # Kill the whole process group: `podman exec` may have children, and a
-        # survivor would keep the phantom zellij client alive.
+        # Detach the client *inside* the container first. Killing the local
+        # `podman exec` only tears down this end of the exec session: the
+        # process it started keeps running in the container, so the zellij
+        # client outlives the browser that asked for it and stays attached --
+        # pinning the shared session to a phantom's geometry and making the
+        # sole-client check lie. Verified against zellij 0.45.1: SIGTERM to the
+        # client detaches it in well under a second and leaves the session and
+        # every other client untouched, which is what `on_force_close "detach"`
+        # in base/zellij.kdl is there to guarantee.
+        proc = podman("exec", self.container, "/bin/sh", "-c",
+                      f'kill -TERM "$(cat {shlex.quote(self.pidfile)} 2>/dev/null)" 2>/dev/null; '
+                      f"rm -f {shlex.quote(self.pidfile)}", timeout=10)
+        if proc.returncode != 0:
+            # Not fatal -- the local kill below still runs -- but it is the one
+            # step here that can fail without any visible effect, and a phantom
+            # client is invisible from outside the container.
+            log(f"detaching {self.session} in {self.container} failed "
+                f"({proc.returncode}): {proc.stderr.strip()}")
+        try:
+            self.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+
+        # Then the local end. Whole process group: `podman exec` may have
+        # children, and this is also the fallback for a close that raced the
+        # pidfile being written.
         try:
             os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -759,6 +810,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._json(200, {"path": path})
 
+    def _client_gone(self):
+        """True once the browser's end of this stream has closed.
+
+        An SSE client never sends anything, so its socket only becomes readable
+        at EOF. Without this check the loop below only learns the browser is
+        gone when a write fails -- and on a session that is producing no output
+        that means waiting for the next heartbeat, with the attachment holding
+        a phantom zellij client pinning the session's geometry until then.
+        """
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            if not ready:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except BlockingIOError:
+            return False  # a spurious wakeup, not EOF
+        except OSError:
+            return True
+
     def _stream(self, attach_id):
         with ATTACH_LOCK:
             att = ATTACHMENTS.get(attach_id)
@@ -778,6 +848,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_beat = time.time()
         try:
             while att.alive():
+                if self._client_gone():
+                    break
                 att.last_seen = time.time()
                 chunk = att.read(timeout=1.0)
                 if chunk is None:
