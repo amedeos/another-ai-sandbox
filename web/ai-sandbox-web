@@ -122,6 +122,22 @@ def load_or_create_token():
 
 # --- Podman interface ----------------------------------------------------------
 
+def same_secret(supplied, expected):
+    """Constant-time compare of a token that arrived over the wire.
+
+    hmac.compare_digest raises TypeError on a str with any non-ASCII character,
+    and headers reach us latin-1 decoded, so a stale or mangled cookie would
+    otherwise take the handler down with a traceback and no response at all --
+    the dashboard looking dead rather than sending the reader to the login page.
+    Comparing the encoded bytes gives a plain mismatch instead.
+    """
+    try:
+        return hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"),
+                                   expected.encode("utf-8", "surrogateescape"))
+    except (AttributeError, UnicodeError):
+        return False
+
+
 def podman(*args, timeout=20, check=False):
     return subprocess.run([PODMAN, *args], capture_output=True, text=True,
                           timeout=timeout, check=check)
@@ -483,9 +499,12 @@ class Attachment:
         os.close(slave)
 
     def set_size(self, cols, rows):
-        self.cols, self.rows = cols, rows
-        fcntl.ioctl(self.master, termios.TIOCSWINSZ,
-                    struct.pack("HHHH", rows, cols, 0, 0))
+        with self.lock:
+            if self.closed:
+                raise OSError("attachment is closed")
+            self.cols, self.rows = cols, rows
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
 
     def write(self, data):
         with self.lock:
@@ -493,13 +512,30 @@ class Attachment:
                 os.write(self.master, data)
 
     def read(self, timeout=1.0):
-        ready, _, _ = select.select([self.master], [], [], timeout)
-        if not ready:
-            return b""
-        try:
-            return os.read(self.master, 65536)
-        except OSError:
-            return None  # PTY gone
+        # Every touch of the fd happens under the lock, like write(): the
+        # reaper closes it from another thread, and reading a closed fd is not
+        # merely an error -- the number can already have been reassigned to a
+        # freshly accepted socket, so the read would take bytes from an
+        # unrelated connection.
+        #
+        # Polled in short slices rather than waiting the full timeout inside
+        # the lock, because write() takes the same lock: blocking there for a
+        # second on an idle session would put that second between a keystroke
+        # and the agent seeing it.
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                if self.closed:
+                    return None
+                try:
+                    ready, _, _ = select.select([self.master], [], [], 0)
+                    if ready:
+                        return os.read(self.master, 65536)
+                except OSError:
+                    return None  # PTY gone
+            if time.monotonic() >= deadline:
+                return b""
+            time.sleep(0.01)
 
     def alive(self):
         return not self.closed and self.proc.poll() is None
@@ -600,7 +636,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Never echo the query string or headers: the bootstrap URL carries the
         # token.
-        log(f"{self.command} {self.path.split('?', 1)[0]} -> {args[1] if len(args) > 1 else ''}")
+        #
+        # getattr, because http.server logs errors from before the request line
+        # has been parsed -- a malformed request sets neither attribute, and an
+        # AttributeError here kills the handler thread with the 400 still
+        # unwritten, so the client gets nothing at all.
+        path = getattr(self, "path", "-")
+        log(f"{getattr(self, 'command', '-')} {path.split('?', 1)[0]} "
+            f"-> {args[1] if len(args) > 1 else ''}")
 
     def _send(self, code, body=b"", ctype="text/plain; charset=utf-8", extra=None):
         if isinstance(body, str):
@@ -621,8 +664,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                    {"Cache-Control": "no-store", **(extra or {})})
 
     def _body(self, limit=MAX_BODY_BYTES):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > limit:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > limit:
+            # The body has to leave the socket even when it is refused: this is
+            # a keep-alive connection, and whatever is left would be parsed as
+            # the next request, desynchronising everything the browser sends
+            # afterwards. Closing is simpler and cheaper than draining
+            # megabytes we have already decided not to look at.
+            self.close_connection = True
             return None
         return self.rfile.read(length) if length else b""
 
@@ -661,9 +713,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _authed(self, allow_cookie=True):
         expected = self.server.token
         header = self.headers.get("Authorization") or ""
-        if header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), expected):
+        if header.startswith("Bearer ") and same_secret(header[7:].strip(), expected):
             return True
-        return bool(allow_cookie and hmac.compare_digest(self._cookie_token(), expected))
+        return bool(allow_cookie and same_secret(self._cookie_token(), expected))
 
     def _guard(self, allow_cookie=True):
         """Common gate. Returns True when the request may proceed."""
@@ -689,7 +741,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # cannot set request headers.
             params = urllib.parse.parse_qs(query)
             supplied = (params.get("t") or [""])[0]
-            if supplied and self._host_ok() and hmac.compare_digest(supplied, self.server.token):
+            if supplied and self._host_ok() and same_secret(supplied, self.server.token):
                 self._send(303, b"", extra={
                     "Location": "/",
                     "Set-Cookie": (f"ai_sandbox_web={self.server.token}; Path=/; "
@@ -1072,6 +1124,19 @@ def main():
     server.token = token
 
     threading.Thread(target=reap_attachments, daemon=True).start()
+
+    # systemd stops and restarts this unit with SIGTERM, and the README tells
+    # people to. Python's default handler exits without unwinding, so the
+    # shutdown below would never run and every attached session would be left
+    # with a zellij client inside the container that nothing can now detach --
+    # which also makes the sole-client check lie for as long as the session
+    # lives. serve_forever() returns from shutdown(), so the finally: block
+    # does the closing either way.
+    def stop(signum, frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
 
     url = f"http://{args.addr}:{server.server_address[1]}"
     log(f"listening on {url}")
