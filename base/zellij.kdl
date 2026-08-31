@@ -1,0 +1,28 @@
+// =============================================================================
+// zellij configuration for ai-sandbox --web sessions
+// Installed to /etc/zellij/config.kdl; selected via ZELLIJ_CONFIG_FILE.
+// =============================================================================
+
+// Load-bearing: with serialization on, an exited session lingers in
+// `zellij list-sessions` so it can be resurrected.  ai-sandbox-supervise polls
+// that listing to decide when the agent is done, so a lingering session would
+// keep container PID 1 alive forever and --rm would never fire.
+session_serialization false
+
+// The agent TUI owns the screen; give it every column and row available.
+pane_frames false
+default_layout "compact"
+
+// Agent TUIs and the browser terminal both rely on mouse reporting.
+mouse_mode true
+
+// A client killed by SIGTERM (podman stop, a reaped browser attachment)
+// must detach, never take the session down with it.
+on_force_close "detach"
+
+// The release-notes pane would otherwise cover the agent on the first run of
+// each new zellij version.
+show_release_notes false
+
+// copy_command is deliberately unset: a sandboxed agent gets no bridge to the
+// host clipboard.
