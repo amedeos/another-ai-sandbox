@@ -8,7 +8,13 @@
 #
 # Usage: bash test/test_webui.sh
 # =============================================================================
-set -euo pipefail
+#
+# Deliberately not `set -e`, unlike the other scripts in this repo: a test
+# harness runs commands that are *expected* to fail (probing for 401s, killing
+# clients that may already be gone), and under -e any missed guard aborts the
+# whole run silently after the last thing it printed -- which reads as a hang
+# rather than a failure. Each test checks its own conditions explicitly.
+set -uo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -107,15 +113,19 @@ run_test() {
     echo -ne "  ${CYAN}TEST${NC}: ${name}... "
 }
 
+# Note the assignment form rather than ((PASS++)). Post-increment evaluates to
+# the *old* value, so the very first ((PASS++)) -- when PASS is still 0 --
+# returns exit status 1. As the last command of a test function that becomes
+# the function's status, and the whole run dies after the first passing test.
 pass() {
     echo -e "${GREEN}PASS${NC}"
-    ((PASS++))
+    PASS=$((PASS + 1))
 }
 
 fail() {
     local reason="${1:-}"
     echo -e "${RED}FAIL${NC}${reason:+ ($reason)}"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
 }
 
 skip() {
@@ -216,6 +226,7 @@ start_dashboard() {
 
 stop_dashboard() {
     [[ -n "$WEB_PID" ]] && kill "$WEB_PID" 2>/dev/null
+    true
     [[ -n "$STAGING" ]] && rm -rf "$STAGING"
     WEB_PID=""
 }
@@ -257,7 +268,7 @@ test_optin_isolation() {
     local all labelled listed
     all="$(podman ps -q | wc -l)"
     labelled="$(podman ps --filter label=ai-sandbox.web=1 -q | wc -l)"
-    listed="$(web GET /api/sessions)"
+    listed="$(web GET /api/sessions || true)"
 
     podman rm -f "webtest-plain-$$" >/dev/null 2>&1 || true
 
@@ -343,7 +354,7 @@ test_web_session_labels() {
     labels="$(podman inspect --format \
         '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}/{{index .Config.Labels "ai-sandbox.cols"}}' \
         "sandbox-${name}" 2>/dev/null || true)"
-    listed="$(web GET /api/sessions)"
+    listed="$(web GET /api/sessions || true)"
     teardown_session "$name"
 
     if [[ "$labels" == "1/${name}/111" ]] && grep -q "$name" <<<"$listed"; then
@@ -365,7 +376,7 @@ test_web_session_listed() {
     fi
 
     local body
-    body="$(web GET /api/sessions)"
+    body="$(web GET /api/sessions || true)"
     if grep -q "wt1$$" <<<"$body" && grep -q '"cols": 100' <<<"$body"; then
         pass
     else
@@ -394,10 +405,10 @@ test_dual_attach() {
     # Client B: the browser, through the dashboard's own PTY.
     local attach_id
     attach_id="$(web POST "/api/sessions/${name}/attach" |
-        python3 -c 'import json,sys; print(json.load(sys.stdin).get("attach_id",""))')"
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("attach_id",""))' 2>/dev/null || true)"
     if [[ -z "$attach_id" ]]; then
         fail "browser could not attach"
-        kill "$pid_a" 2>/dev/null
+        kill "$pid_a" 2>/dev/null || true
         return
     fi
 
@@ -416,12 +427,12 @@ test_dual_attach() {
         -H "Authorization: Bearer ${TOKEN}" -H 'X-AI-Sandbox: 1' \
         -H 'Content-Type: application/json' -d '{"cols":200,"rows":60}')"
 
-    kill "$pid_stream" 2>/dev/null
+    kill "$pid_stream" 2>/dev/null || true
     sleep 4
     local after_browser
     after_browser="$(client_count "$name")"
 
-    kill "$pid_a" 2>/dev/null
+    kill "$pid_a" 2>/dev/null || true
     sleep 2
     local alive="no"
     podman container exists "sandbox-${name}" 2>/dev/null && alive="yes"
@@ -444,7 +455,7 @@ test_paste_image() {
 
     local attach_id
     attach_id="$(web POST "/api/sessions/${name}/attach" |
-        python3 -c 'import json,sys; print(json.load(sys.stdin).get("attach_id",""))')"
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("attach_id",""))' 2>/dev/null || true)"
     if [[ -z "$attach_id" ]]; then
         fail "could not attach"
         return
@@ -458,8 +469,9 @@ test_paste_image() {
     rejected="$(status_of POST "/api/attach/${attach_id}/paste" \
         -H "Authorization: Bearer ${TOKEN}" -H 'X-AI-Sandbox: 1' \
         --data-binary 'this is not an image')"
-    accepted="$(web POST "/api/attach/${attach_id}/paste" --data-binary "@${png}")"
-    path="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("path",""))' <<<"$accepted")"
+    accepted="$(web POST "/api/attach/${attach_id}/paste" --data-binary "@${png}" || true)"
+    path="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("path",""))' \
+            <<<"$accepted" 2>/dev/null || true)"
 
     local present="no"
     if [[ -n "$path" ]] && podman exec "sandbox-${name}" test -f "$path" 2>/dev/null; then
