@@ -1056,6 +1056,15 @@ if [[ "$WEB_MODE" == true ]]; then
     fi
 
     echo -e "${GREEN}Session ${SESSION} started.${NC}"
+
+    # With no terminal there is nothing to attach to, so start-and-report is the
+    # only sensible behaviour. This is also how the web dashboard starts
+    # sessions: it runs this script and then attaches over its own PTY.
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        echo "${SESSION}"
+        exit 0
+    fi
+
     echo -e "  Detach with ${CYAN}Ctrl-o d${NC} — the agent keeps running."
     echo -e "  Reattach with: ${CYAN}ai-sandbox attach ${SESSION}${NC}"
     echo ""
