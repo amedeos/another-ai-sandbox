@@ -250,21 +250,25 @@ def zellij_client_count(container, session):
 MAX_DIR_ENTRIES = 500
 
 
-def inside_roots(path, allow_root_itself):
-    """Is `path` within the directories a session may be mounted from?
-
-    Mounting a root itself is refused -- a whole home directory should not be
-    handed to an agent by accident -- but browsing it has to be allowed, or
-    there is no way to reach anything below it.
-    """
+def containing_root(path):
+    """The allowed root that contains `path` (or is `path`), else None."""
     for root in ALLOWED_ROOTS:
-        if path == root:
-            if allow_root_itself:
-                return True
-            continue
-        if root in path.parents:
-            return True
-    return False
+        if path == root or root in path.parents:
+            return root
+    return None
+
+
+def hidden_below(path, root):
+    """Does any component of `path` under `root` start with a dot?
+
+    Being under $HOME is not enough to be safe to mount: ~/.ssh, ~/.gnupg and
+    ~/.config/ai-sandbox all are, and the last one holds this dashboard's own
+    access token and the API-key file. A sandbox gets its directories
+    read-write, so mounting one hands a compromised agent the host -- and the
+    threat model this validation exists for is exactly an agent that reached
+    this server. The terminal can still do it: there the person typing chose.
+    """
+    return any(part.startswith(".") for part in path.relative_to(root).parts)
 
 
 def complete_dirs(typed):
@@ -281,8 +285,8 @@ def complete_dirs(typed):
     """
     expanded = os.path.expanduser(typed or str(ALLOWED_ROOTS[0]) + "/")
     # Split the string rather than asking pathlib for .parent/.name: pathlib
-    # normalises a trailing "." away, and "." is exactly what someone types to
-    # ask for hidden directories.
+    # normalises a trailing "." away, so "~/repos/." would be read as a request
+    # for the children of "~" -- a level higher than what was typed.
     if expanded.endswith("/"):
         parent_str, partial = expanded, ""
     else:
@@ -295,9 +299,12 @@ def complete_dirs(typed):
         return None, "no such directory"
     if not parent.is_dir():
         return None, "no such directory"
-    if not inside_roots(parent, allow_root_itself=True):
+    root = containing_root(parent)
+    if root is None:
         allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
         return None, f"outside the allowed roots: {allowed}"
+    if hidden_below(parent, root):
+        return None, "hidden directories are not offered here"
 
     lowered = partial.lower()
     names = []
@@ -305,8 +312,10 @@ def complete_dirs(typed):
         with os.scandir(parent) as entries:
             for entry in entries:
                 name = entry.name
-                # Dotfiles only once the user has shown interest in them.
-                if name.startswith(".") and not partial.startswith("."):
+                # Never offered, because they cannot be mounted from here --
+                # suggesting a path the start API will refuse is worse than
+                # not suggesting it.
+                if name.startswith("."):
                     continue
                 if not name.lower().startswith(lowered):
                     continue
@@ -351,11 +360,18 @@ def validate_start_spec(body):
         path = Path(os.path.expanduser(entry)).resolve()
         if not path.is_dir():
             raise ValueError(f"not a directory: {entry}")
-        # Must be strictly inside an allowed root: the root itself is refused,
-        # so a whole home directory cannot be handed to an agent by accident.
-        if not inside_roots(path, allow_root_itself=False):
+        # Must be strictly inside an allowed root -- the root itself is
+        # refused, so a whole home directory cannot be handed to an agent by
+        # accident -- and must not reach into a dot directory.
+        root = containing_root(path)
+        if root is None or path == root:
             allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
             raise ValueError(f"directory must be below one of: {allowed}")
+        if hidden_below(path, root):
+            raise ValueError("hidden directories cannot be mounted from the "
+                             "dashboard: they hold ssh keys, this dashboard's "
+                             "own token and the API-key file. Start such a "
+                             "session from a terminal if you mean it.")
         resolved.append(path)
 
     argv = [AI_SANDBOX, agent, str(resolved[0])]

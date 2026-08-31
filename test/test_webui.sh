@@ -368,6 +368,26 @@ test_start_rejects_unknown_agent() {
     fi
 }
 
+# Being under $HOME is not enough to be safe to mount read-write: ~/.ssh and
+# ~/.config/ai-sandbox are, and the second holds the dashboard's own token.
+test_start_refuses_hidden_directory() {
+    run_test "the start API refuses a hidden directory, and never offers one"
+
+    local before after body listed
+    before="$(podman ps -q | wc -l)"
+    body="$(web POST /api/sessions -H 'Content-Type: application/json' \
+        -d "{\"agent\":\"claude\",\"dirs\":[\"${WORK_DIR}/.secrets\"]}")"
+    after="$(podman ps -q | wc -l)"
+    listed="$(web GET "/api/dirs?path=${WORK_DIR}/")"
+
+    if grep -q 'hidden directories' <<<"$body" && [[ "$before" == "$after" ]] &&
+       ! grep -q '.secrets' <<<"$listed"; then
+        pass
+    else
+        fail "body=${body} listed=${listed}"
+    fi
+}
+
 # Completion is a filesystem listing driven from the browser, so it has to stay
 # inside the same roots a session may be mounted from -- and stay one level
 # deep, or a request would cost a walk of everything below it.
@@ -759,7 +779,7 @@ check_prerequisites
 WORK_DIR="$(mktemp -d)"
 # Fixtures for the completion test: a directory to find, one nested below it to
 # prove the listing stops at one level, and one differing only in case.
-mkdir -p "${WORK_DIR}/proj/nested" "${WORK_DIR}/CaseTest"
+mkdir -p "${WORK_DIR}/proj/nested" "${WORK_DIR}/CaseTest" "${WORK_DIR}/.secrets"
 if ! start_dashboard; then
     echo -e "${RED}Could not start the dashboard. Aborting.${NC}"
     exit 1
@@ -774,6 +794,7 @@ test_optin_isolation
 test_start_rejects_bad_directory
 test_start_rejects_unknown_agent
 test_start_rejects_bad_block_rule
+test_start_refuses_hidden_directory
 test_dirs_completion
 test_web_session_labels
 test_web_session_listed
