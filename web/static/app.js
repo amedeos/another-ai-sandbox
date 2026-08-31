@@ -14,7 +14,8 @@ const BASE_FONT = 14;
 const INPUT_FLUSH_MS = 12;
 
 const $ = (id) => document.getElementById(id);
-const state = { term: null, attachId: null, source: null, session: null, pending: [] };
+const state = { term: null, attachId: null, source: null, session: null, pending: [],
+                zoom: null, fit: 1 };  // zoom: null = fit the window
 
 async function api(path, options = {}) {
   const opts = Object.assign({ headers: {} }, options);
@@ -149,11 +150,30 @@ function rescale() {
   const natural = scaleBox.getBoundingClientRect();
   if (!natural.width || !natural.height) return;
   const avail = stage.getBoundingClientRect();
-  const scale = Math.min(avail.width / natural.width,
-                         avail.height / natural.height, 1.75);
-  // Never shrink past legibility; the stage scrolls instead.
-  const clamped = Math.max(scale, 0.45);
-  scaleBox.style.transform = `scale(${clamped})`;
+  state.fit = Math.min(avail.width / natural.width,
+                       avail.height / natural.height, 1.75);
+  // Never shrink past legibility on its own; below this the stage scrolls, and
+  // the zoom control is there for a session too wide to fit at a readable size.
+  const scale = state.zoom || Math.max(state.fit, 0.45);
+  scaleBox.style.transform = `scale(${scale})`;
+  // A transform leaves layout size untouched, so the stage would scroll across
+  // the unscaled grid; give the sizer the dimensions actually painted.
+  const sizer = $('term-sizer');
+  sizer.style.width = `${Math.ceil(natural.width * scale)}px`;
+  sizer.style.height = `${Math.ceil(natural.height * scale)}px`;
+  $('zoom-level').textContent = state.zoom ? `${Math.round(scale * 100)}%` : 'fit';
+}
+
+// Zoom is a display control only: it never changes the session's geometry, so
+// it is safe while another client is attached -- which is exactly when a wide
+// session cannot be resized down to something readable.
+function setZoom(value) {
+  if (value === null) {
+    state.zoom = null;
+  } else {
+    state.zoom = Math.min(2, Math.max(0.3, Math.round(value * 20) / 20));
+  }
+  rescale();
 }
 
 async function tryResize() {
@@ -173,8 +193,12 @@ async function tryResize() {
     $('term-status').textContent = 'Sole client — terminal sized to this window.';
   } catch (err) {
     // 409: another client is attached, so adopt the session's size and scale.
+    // Say what the numbers are: a session started from a very wide terminal is
+    // unreadable here at fit scale, and the way out is the zoom control, a
+    // smaller terminal, or detaching the other client.
     $('term-status').textContent =
-      'Another client is attached — showing the session at its own size.';
+      `Another client is attached — the session stays ${state.term.cols}x${state.term.rows}` +
+      ` while this window fits ${cols}x${rows}. Use the zoom control, or detach the other client.`;
   }
   rescale();
 }
@@ -222,6 +246,8 @@ async function openTerminal(session) {
   $('list-view').hidden = true;
   $('term-view').hidden = false;
   $('back').hidden = false;
+  $('zoom').hidden = false;
+  state.zoom = null;
   $('crumb').textContent = `${session.session} · ${session.agent}`;
 
   const term = new Terminal({
@@ -283,11 +309,15 @@ function closeTerminal() {
   $('term-view').hidden = true;
   $('list-view').hidden = false;
   $('back').hidden = true;
+  $('zoom').hidden = true;
   $('crumb').textContent = '';
   refresh();
 }
 
 $('back').addEventListener('click', closeTerminal);
+$('zoom-in').addEventListener('click', () => setZoom((state.zoom || state.fit) * 1.25));
+$('zoom-out').addEventListener('click', () => setZoom((state.zoom || state.fit) / 1.25));
+$('zoom-fit').addEventListener('click', () => setZoom(null));
 window.addEventListener('beforeunload', () => {
   if (state.attachId) {
     api(`/api/attach/${state.attachId}`, { method: 'DELETE', keepalive: true }).catch(() => {});

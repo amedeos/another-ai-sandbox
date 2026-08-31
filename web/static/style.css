@@ -9,11 +9,22 @@
   --danger: #ff6b6b;
 }
 * { box-sizing: border-box; }
+
+/* Load-bearing: `main` below sets `display: grid`, and an author rule beats the
+   user agent's `[hidden] { display: none }` whatever its specificity. Without
+   this, setting .hidden on a <main> does nothing and the session list stays on
+   screen underneath the terminal it was supposed to make room for. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
   font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* The terminal view claims the whole viewport below the header. */
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 body.centered { display: grid; place-items: center; min-height: 100vh; }
 
@@ -28,7 +39,11 @@ header {
 .muted { color: var(--muted); }
 .error { color: var(--danger); white-space: pre-wrap; }
 
-main { padding: 1rem; display: grid; gap: 1rem; max-width: 60rem; }
+main {
+  padding: 1rem; display: grid; gap: 1rem; max-width: 60rem;
+  flex: 1 1 auto; min-height: 0; align-content: start;
+}
+#list-view { overflow: auto; }
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -71,8 +86,18 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* The terminal renders at a fixed cell grid -- the session's own geometry --
    and is scaled to fit the viewport, so the browser never forces a smaller
-   size on a terminal client sharing the session. */
-#term-view { max-width: none; padding: .5rem; }
-#term-stage { overflow: auto; }
-#term-scale { transform-origin: top left; width: max-content; }
-.status { margin: .4rem 0 0; }
+   size on a terminal client sharing the session. #term-sizer carries the
+   *scaled* dimensions, because a CSS transform does not change layout size and
+   the stage would otherwise scroll across the unscaled grid. */
+#term-view {
+  max-width: none; padding: .5rem; gap: .25rem;
+  grid-template-rows: 1fr auto;
+}
+#term-stage { overflow: auto; min-height: 0; }
+#term-sizer { position: relative; }
+#term-scale { position: absolute; top: 0; left: 0; transform-origin: top left; width: max-content; }
+.status { margin: .4rem 0 0; font-size: .85rem; }
+
+.zoom { display: flex; align-items: center; gap: .25rem; }
+.zoom button { padding: .2rem .5rem; min-width: 2rem; }
+.zoom .level { color: var(--muted); font-size: .85rem; min-width: 3.2rem; text-align: center; }
