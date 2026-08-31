@@ -20,12 +20,30 @@ jobs:
           for f in **/*.sh **/*.bash; do
             files+=("$f")
           done
-          for f in ai-sandbox; do
+          for f in ai-sandbox base/ai-sandbox-supervise; do
             [[ -f "$f" ]] && files+=("$f")
           done
           if [[ ${#files[@]} -gt 0 ]]; then
             shellcheck --format=gcc "${files[@]}"
           fi
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ai-sandbox-web has no extension, so ShellCheck's glob does not pick it
+      # up; it is Python and must not be linted as shell.
+      - name: Byte-compile the dashboard
+        run: python -m py_compile web/ai-sandbox-web
+
+      - name: Ruff
+        run: pipx run ruff check --target-version py39 web/ai-sandbox-web
 
   hadolint:
     name: Hadolint

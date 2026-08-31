@@ -23,6 +23,7 @@
 
 import argparse
 import base64
+import binascii
 import fcntl
 import hmac
 import http.server
@@ -279,7 +280,7 @@ def validate_start_spec(body):
 def start_session(body):
     argv = validate_start_spec(body)
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, check=False)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, "\n".join(detail[-6:]) or "ai-sandbox failed"
@@ -478,12 +479,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _authed(self, allow_cookie=True):
         expected = self.server.token
         header = self.headers.get("Authorization") or ""
-        if header.startswith("Bearer "):
-            if hmac.compare_digest(header[7:].strip(), expected):
-                return True
-        if allow_cookie and hmac.compare_digest(self._cookie_token(), expected):
+        if header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip(), expected):
             return True
-        return False
+        return bool(allow_cookie and hmac.compare_digest(self._cookie_token(), expected))
 
     def _guard(self, allow_cookie=True):
         """Common gate. Returns True when the request may proceed."""
@@ -681,7 +679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             data = base64.b64decode(json.loads(raw)["d"], validate=True)
-        except Exception:
+        except (ValueError, KeyError, TypeError, binascii.Error):
             self._json(400, {"error": "invalid input"})
             return
         try:
@@ -696,7 +694,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             body = json.loads(raw or b"{}")
             cols, rows = int(body["cols"]), int(body["rows"])
-        except Exception:
+        except (ValueError, KeyError, TypeError):
             self._json(400, {"error": "invalid size"})
             return
         if not (40 <= cols <= 500 and 10 <= rows <= 200):
@@ -741,7 +739,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         proc = subprocess.run(
             [PODMAN, "exec", "-i", att.container, "dd", f"of={path}",
              "bs=64k", "status=none"],
-            input=raw, capture_output=True, timeout=60)
+            input=raw, capture_output=True, timeout=60, check=False)
         if proc.returncode != 0:
             self._json(500, {"error": "could not copy the image into the container"})
             return
