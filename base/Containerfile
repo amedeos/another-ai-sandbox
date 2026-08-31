@@ -121,8 +121,15 @@ LABEL ai-sandbox.zellij="0.45.1"
 # The socket path has a 107-byte limit, so keep it short and on tmpfs.
 # LANG matters because the package layer removes /usr/share/locale; glibc's
 # built-in C.UTF-8 is the only UTF-8 locale left, and zellij's UI needs one.
+# TERM belongs here for the same reason: zellij gives its panes the zellij
+# server's environment, so without it the agent inside a --web session cannot
+# detect a terminal and drops to black and white.  `ai-sandbox --web` passes
+# the launching terminal's own TERM, which overrides this; this is the default
+# for a container started any other way.
 ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
     ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
+    TERM=xterm-256color \
+    COLORTERM=truecolor \
     LANG=C.UTF-8
 
 COPY zellij.kdl /etc/zellij/config.kdl

@@ -671,6 +671,7 @@ fi
 SESSION=""
 WEB_COLS=120
 WEB_ROWS=32
+WEB_TERM="xterm-256color"
 if [[ "$WEB_MODE" == true ]]; then
     SESSION="${OPT_WEB_NAME:-${AI_SANDBOX_SESSION:-}}"
     if [[ -z "$SESSION" ]]; then
@@ -699,6 +700,16 @@ if [[ "$WEB_MODE" == true ]]; then
     elif [[ -t 0 ]]; then
         read -r WEB_ROWS WEB_COLS < <(stty size 2>/dev/null || echo "32 120")
     fi
+
+    # The agent's TERM comes from here and nowhere else (see the -e below), so
+    # a useless one must not be propagated: the web dashboard starts sessions
+    # from a systemd user service, where TERM is either absent or "dumb", and
+    # an agent told its terminal is dumb renders in black and white for every
+    # client -- including the browser, which is a perfectly capable one.
+    case "${TERM:-}" in
+        ""|dumb|unknown|none) WEB_TERM="xterm-256color" ;;
+        *)                    WEB_TERM="$TERM" ;;
+    esac
 fi
 
 # --- Resolve opencode settings ------------------------------------------------
@@ -988,6 +999,15 @@ if [[ "$WEB_MODE" == true ]]; then
         --label "ai-sandbox.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         -e "AI_SANDBOX_WEB=1"
         -e "AI_SANDBOX_SESSION=${SESSION}"
+        # The agent runs in a zellij pane, and zellij hands its panes the
+        # environment of the *server* -- which is this container's PID 1 -- so
+        # this is the only place a --web agent can learn it has a terminal at
+        # all. Verified with zellij 0.45.1: a pane started from a server with
+        # no TERM has no TERM either, and a TUI that cannot detect a terminal
+        # renders in black and white. The TERM passed to `podman exec` on
+        # attach sizes up the *client*, not the agent, so it cannot cover this.
+        -e "TERM=${WEB_TERM}"
+        -e "COLORTERM=${COLORTERM:-truecolor}"
     )
 fi
 

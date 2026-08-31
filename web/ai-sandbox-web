@@ -299,8 +299,13 @@ def validate_start_spec(body):
 
 def start_session(body):
     argv = validate_start_spec(body)
+    # State the terminal the session will actually be driven from. This process
+    # is a systemd user service, so its own TERM is absent or "dumb" and says
+    # nothing about the client; the browser terminal is xterm.js, which handles
+    # 256 colours and truecolor. The agent inherits this through `podman run`.
+    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                          stdin=subprocess.DEVNULL, check=False)
+                          stdin=subprocess.DEVNULL, check=False, env=env)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, "\n".join(detail[-6:]) or "ai-sandbox failed"
