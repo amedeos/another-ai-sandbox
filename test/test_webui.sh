@@ -369,24 +369,28 @@ test_start_rejects_unknown_agent() {
 # test_web_session_listed's job, asserted there against a session that stays
 # up rather than here against one racing its own teardown.
 test_web_session_labels() {
-    run_test "ai-sandbox --web labels the container"
+    run_test "ai-sandbox --web labels the container and gives the agent a TERM"
 
-    local name="wtr$$" out="${STAGING}/ai-sandbox-start.log" labels="" i
+    local name="wtr$$" out="${STAGING}/ai-sandbox-start.log" probe="" labels="" envs="" i
     # Launched in the background and watched from the first moment, because the
     # agent here is `--version`: it prints and exits, and --rm then takes the
     # container away. ai-sandbox itself waits for the zellij session before it
     # returns, so inspecting after it returns loses that race every time -- the
     # old blind SKIP was this, not a slow machine.
-    "$AI_SANDBOX" "$TEST_AGENT" "$WORK_DIR" \
+    # TERM=dumb on purpose: that is what a systemd user service hands the web
+    # dashboard, and propagating it would tell the agent it has no colours.
+    env TERM=dumb "$AI_SANDBOX" "$TEST_AGENT" "$WORK_DIR" \
         --web --web-name "$name" --web-size 111x33 \
         --network-off --non-interactive -- --version >"$out" 2>&1 &
     local pid=$!
 
+    # Labels and environment in one inspect: the container is racing its own
+    # teardown, so a second call could find it already gone.
     for ((i = 0; i < 400; i++)); do
-        labels="$(podman inspect --format \
-            '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}/{{index .Config.Labels "ai-sandbox.cols"}}' \
+        probe="$(podman inspect --format \
+            '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}/{{index .Config.Labels "ai-sandbox.cols"}}|{{.Config.Env}}' \
             "sandbox-${name}" 2>/dev/null || true)"
-        [[ -n "$labels" ]] && break
+        [[ -n "$probe" ]] && { labels="${probe%%|*}"; envs="${probe#*|}"; break; }
         # Nothing more is coming once ai-sandbox has exited without creating it.
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.05
@@ -395,15 +399,20 @@ test_web_session_labels() {
     wait "$pid" 2>/dev/null
     teardown_session "$name"
 
-    if [[ "$labels" == "1/${name}/111" ]]; then
+    # TERM is what tells the agent it has a terminal at all. zellij hands its
+    # panes the environment of container PID 1, so if it is missing here the
+    # agent renders in black and white however the client is attached.
+    if [[ "$labels" == "1/${name}/111" ]] && grep -q "TERM=xterm" <<<"$envs"; then
         pass
     elif grep -qi "not set and running non-interactively" "$out" 2>/dev/null; then
         skip "no ${TEST_AGENT} credentials configured on this host"
     elif [[ -z "$labels" ]]; then
         # Never a bare skip: say what the script actually complained about.
         fail "no container: $(tr '\n' ' ' <"$out" | tail -c 160)"
-    else
+    elif [[ "$labels" != "1/${name}/111" ]]; then
         fail "labels=${labels}"
+    else
+        fail "no usable TERM in the container environment: ${envs}"
     fi
 }
 
