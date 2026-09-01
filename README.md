@@ -404,6 +404,8 @@ ai-sandbox stop claude-my-project-a1b2      # or: ai-sandbox stop --all
 xdg-open "http://127.0.0.1:8765/?t=$(cat ~/.config/ai-sandbox/web-token)"
 ```
 
+Opening `http://127.0.0.1:8765/` without the `?t=` gives a form to paste the token into instead; either way the token is exchanged once for an `HttpOnly` session cookie and never appears in a URL again.
+
 The dashboard starts sessions with the same parameters as the command line: agent, the working directory and any number of extra directories (one per line, each mounted at `/workspace/<name>` like `--dir`), an optional session name, CPUs, memory, network on/off, and `--block-cmd` rules one per line. It builds no `podman run` of its own — it invokes `ai-sandbox`, so every session is hardened identically however it was started.
 
 Without `--web` nothing changes: the agent is PID 1 in a foreground container, zellij never runs, and the container carries no labels.

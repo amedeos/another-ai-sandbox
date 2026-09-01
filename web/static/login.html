@@ -4,22 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ai-sandbox</title>
-<link rel="stylesheet" href="/static/style.css">
+<!-- No stylesheet link and no script: this page is served with a 401, and
+     /static/* is behind the same auth gate, so an external sheet would 401
+     too. The CSP is `script-src 'self'` (no 'unsafe-inline'), so an inline
+     script here would be blocked and the form would submit nothing -- which is
+     exactly how pasting the token used to fail silently. `style-src` does allow
+     'unsafe-inline', hence the block below. Keep this page dependency-free. -->
+<style>
+  :root { color-scheme: dark; --bg:#12141a; --panel:#191c24; --line:#2a2f3a;
+          --fg:#d7dce5; --muted:#838b9c; --accent:#6aa9ff; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh; display: grid; place-items: center;
+  }
+  form {
+    width: min(24rem, 92vw); display: grid; gap: .75rem;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 1rem;
+  }
+  h1 { margin: 0; font-size: 1rem; }
+  p { margin: 0; color: var(--muted); }
+  input {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: .45rem .6rem; font: inherit; min-width: 0;
+  }
+  button {
+    background: var(--accent); color: #08121f; border: 0;
+    border-radius: 6px; padding: .45rem .9rem;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+</style>
 </head>
-<body class="centered">
-  <form class="card login" id="login">
+<body>
+  <!-- A plain GET submit lands on /?t=<token>, the same bootstrap URL the
+       README tells people to open, which trades the token for the session
+       cookie and redirects back here. -->
+  <form action="/" method="get">
     <h1>ai-sandbox</h1>
-    <p class="muted">Paste the access token from
-      <code>~/.config/ai-sandbox/web-token</code>.</p>
-    <input type="password" id="token" placeholder="access token" autocomplete="off" autofocus>
+    <p>Paste the access token from <code>~/.config/ai-sandbox/web-token</code>.</p>
+    <input type="password" name="t" placeholder="access token"
+           autocomplete="off" autofocus required>
     <button type="submit">Unlock</button>
   </form>
-<script>
-document.getElementById('login').addEventListener('submit', function (e) {
-  e.preventDefault();
-  var t = document.getElementById('token').value.trim();
-  if (t) { window.location = '/?t=' + encodeURIComponent(t); }
-});
-</script>
 </body>
 </html>

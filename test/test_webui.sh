@@ -326,6 +326,38 @@ test_auth_required() {
     fi
 }
 
+test_login_form_works_without_js() {
+    run_test "the login page can trade a token for a cookie without JS"
+
+    # The page is served with a 401 and /static/* is behind the same gate, so
+    # it may not reference an external sheet or script; and the CSP is
+    # `script-src 'self'`, so an inline script would be blocked by the browser
+    # and never run. That is how pasting the token used to fail silently: the
+    # handler never registered, the form fell back to a native submit, and the
+    # field it should have sent had no name. The form must therefore work with
+    # no JavaScript at all.
+    local code body redirect padded
+    code="$(status_of GET /)"
+    body="$(curl -s "http://127.0.0.1:${WEB_PORT}/")"
+
+    # -o /dev/null and no -L: we want the 303 itself, not what it points at.
+    redirect="$(curl -s -o /dev/null -w '%{http_code}:%{redirect_url}' \
+        "http://127.0.0.1:${WEB_PORT}/?t=${TOKEN}")"
+    # A native submit sends the field verbatim, whitespace and all.
+    padded="$(status_of GET "/?t=%20${TOKEN}%0A")"
+
+    if [[ "$code" == 401 ]] &&
+       grep -q 'action="/" method="get"' <<<"$body" &&
+       grep -q 'name="t"' <<<"$body" &&
+       ! grep -q '<script' <<<"$body" &&
+       ! grep -q 'rel="stylesheet"' <<<"$body" &&
+       [[ "$redirect" == 303:* && "$padded" == 303 ]]; then
+        pass
+    else
+        fail "code=${code} redirect=${redirect} padded=${padded}"
+    fi
+}
+
 test_csrf_header_required() {
     run_test "state-changing requests need X-AI-Sandbox"
 
@@ -809,6 +841,7 @@ echo "Running tests..."
 echo ""
 
 test_auth_required
+test_login_form_works_without_js
 test_csrf_header_required
 test_optin_isolation
 test_start_rejects_bad_directory

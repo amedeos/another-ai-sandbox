@@ -740,7 +740,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # which is the only way EventSource can authenticate later since it
             # cannot set request headers.
             params = urllib.parse.parse_qs(query)
-            supplied = (params.get("t") or [""])[0]
+            # strip(), because the login form submits the field verbatim and a
+            # token pasted with a stray space or newline would otherwise fail
+            # the compare with no visible reason. The token is urlsafe base64,
+            # so no real token differs from another only by surrounding space.
+            supplied = (params.get("t") or [""])[0].strip()
             if supplied and self._host_ok() and same_secret(supplied, self.server.token):
                 self._send(303, b"", extra={
                     "Location": "/",
