@@ -5,27 +5,33 @@
 # Usage:
 #   ./install.sh              # full install: script + images + BPF (if possible)
 #   ./install.sh --no-build   # install script only, skip image build
+#   ./install.sh --with-web   # install without asking about the web dashboard
 #   ./install.sh --uninstall  # remove everything installed by this script
 #
 # Install:
-#   1. Checks host prerequisites (podman, pasta, git, cgroups v2)
+#   1. Checks host prerequisites (podman, pasta, git, cgroups v2, python3)
 #   2. Installs ai-sandbox and ai-sandbox-build to ~/.local/bin/
 #   3. Copies Containerfiles/entrypoints to ~/.local/share/ai-sandbox/
 #   4. Builds container images via ai-sandbox-build (unless --no-build)
 #   5. Detects if BPF compilation is possible and builds the loader
-#   6. Checks if ~/.local/bin is in PATH, offers to add it
+#   6. Installs the web dashboard and its systemd user unit (optional)
+#   7. Checks if ~/.local/bin is in PATH, offers to add it
 #
 # Uninstall:
-#   Removes ai-sandbox, ai-sandbox-build, and ai-sandbox-loader from
-#   ~/.local/bin, removes build data from ~/.local/share/ai-sandbox/,
-#   optionally removes container images and ~/.config/ai-sandbox,
-#   and cleans the PATH line added to the shell profile.
+#   Stops and removes the web dashboard unit, offers to remove any --web
+#   sessions still running, removes ai-sandbox, ai-sandbox-build,
+#   ai-sandbox-loader and ai-sandbox-web from ~/.local/bin, removes build data
+#   from ~/.local/share/ai-sandbox/, optionally removes container images and
+#   ~/.config/ai-sandbox, and cleans the PATH line added to the shell profile.
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${HOME}/.local/bin"
 DATA_DIR="${HOME}/.local/share/ai-sandbox"
+WEB_DIR="${DATA_DIR}/web"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+WEB_UNIT="ai-sandbox-web.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -41,22 +47,27 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 # --- Argument parsing ---------------------------------------------------------
 DO_BUILD=true
 DO_UNINSTALL=false
+DO_WEB=""          # empty = ask
 
 for arg in "$@"; do
     case "$arg" in
         --no-build)  DO_BUILD=false ;;
         --uninstall) DO_UNINSTALL=true ;;
+        --with-web)  DO_WEB=true ;;
+        --no-web)    DO_WEB=false ;;
         -h|--help)
-            echo "Usage: $0 [--no-build] [--uninstall]"
+            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--uninstall]"
             echo ""
             echo "  --no-build   Skip container image build"
+            echo "  --with-web   Install the web dashboard without asking"
+            echo "  --no-web     Skip the web dashboard"
             echo "  --uninstall  Remove ai-sandbox, BPF loader, images, and config"
             echo "  -h, --help   Show this help"
             exit 0
             ;;
         *)
             err "Unknown option: ${arg}"
-            echo "Usage: $0 [--no-build] [--uninstall]"
+            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--uninstall]"
             exit 1
             ;;
     esac
@@ -127,6 +138,27 @@ check_prerequisites() {
         echo -e "  ${YELLOW}!${NC} sudo    — not found (needed only for BPF command blocking)"
     fi
 
+    # python3 (the web dashboard; standard library only, no venv or pip)
+    if command -v python3 >/dev/null 2>&1; then
+        local pyver
+        pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "?")"
+        if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} python3 (${pyver})"
+        else
+            echo -e "  ${YELLOW}!${NC} python3 — ${pyver} is too old for the web dashboard (needs 3.9+)"
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} python3 — not found (needed only for the web dashboard)"
+        info "    Fedora: dnf install python3 / Gentoo: emerge dev-lang/python / Debian: apt install python3"
+    fi
+
+    # systemd user manager (the dashboard can also run in the foreground)
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment &>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} systemd --user"
+    else
+        echo -e "  ${YELLOW}!${NC} systemd --user — unavailable (run the dashboard with 'ai-sandbox web')"
+    fi
+
     echo ""
 
     if [[ $fatal -ne 0 ]]; then
@@ -157,13 +189,115 @@ install_build_data() {
             continue
         fi
         install -d "${dst}"
-        install -m 644 "${src}/Containerfile" "${dst}/Containerfile"
-        if [[ -f "${src}/entrypoint.sh" ]]; then
-            install -m 755 "${src}/entrypoint.sh" "${dst}/entrypoint.sh"
-        fi
+        # Copy every file in the component directory, not just the two we used
+        # to know about: base/ now also ships zellij.kdl and
+        # ai-sandbox-supervise, and the next added file should not need a
+        # change here.  Executables keep their mode so COPY lands them usable.
+        local file
+        for file in "${src}"/*; do
+            [[ -f "$file" ]] || continue
+            if [[ -x "$file" ]]; then
+                install -m 755 "$file" "${dst}/$(basename "$file")"
+            else
+                install -m 644 "$file" "${dst}/$(basename "$file")"
+            fi
+        done
     done
 
     log "Build data installed successfully"
+}
+
+# --- Web dashboard ------------------------------------------------------------
+verify_sha256() {
+    local file="$1" expected="$2"
+    echo "${expected}  ${file}" | sha256sum -c --status -
+}
+
+# The browser assets are fetched here rather than vendored into the repository,
+# and pinned by content hash rather than trusted.  Serving them from disk is
+# what lets the dashboard set Content-Security-Policy: default-src 'self' with
+# no CDN at runtime.
+fetch_web_assets() {
+    local manifest="${SCRIPT_DIR}/web/assets.sha256"
+    local sha dest url target tmp ok=true
+
+    install -d "${WEB_DIR}/static/vendor"
+
+    while read -r sha dest url; do
+        [[ -z "${sha}" || "${sha}" == \#* ]] && continue
+        target="${WEB_DIR}/static/${dest}"
+
+        if [[ -f "$target" ]] && verify_sha256 "$target" "$sha"; then
+            continue
+        fi
+
+        tmp="$(mktemp)"
+        if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+            warn "Could not download $(basename "$dest") — no network?"
+            rm -f "$tmp"
+            ok=false
+            continue
+        fi
+        if ! verify_sha256 "$tmp" "$sha"; then
+            err "Checksum mismatch for ${url}"
+            rm -f "$tmp"
+            ok=false
+            continue
+        fi
+        install -m 644 "$tmp" "$target"
+        rm -f "$tmp"
+    done < "$manifest"
+
+    [[ "$ok" == true ]]
+}
+
+install_web() {
+    log "Installing the web dashboard"
+
+    install -m 755 "${SCRIPT_DIR}/web/ai-sandbox-web" "${INSTALL_DIR}/ai-sandbox-web"
+    install -d "${WEB_DIR}/static"
+    install -m 644 "${SCRIPT_DIR}"/web/static/*.html \
+                   "${SCRIPT_DIR}"/web/static/*.css \
+                   "${SCRIPT_DIR}"/web/static/*.js "${WEB_DIR}/static/"
+
+    if ! fetch_web_assets; then
+        warn "Browser assets are missing, so the dashboard will not render."
+        warn "Re-run install.sh once you have network access."
+        return 1
+    fi
+
+    install -d "${SYSTEMD_USER_DIR}"
+    install -m 644 "${SCRIPT_DIR}/web/${WEB_UNIT}" "${SYSTEMD_USER_DIR}/${WEB_UNIT}"
+
+    if command -v systemctl &>/dev/null && systemctl --user show-environment &>/dev/null; then
+        systemctl --user daemon-reload
+        echo ""
+        echo -en "  Enable and start the web dashboard now? [Y/n] "
+        read -r answer
+        case "$answer" in
+            [nN]*)
+                info "Skipped. Enable it later with:"
+                info "  systemctl --user enable --now ${WEB_UNIT}"
+                ;;
+            *)
+                if systemctl --user enable --now "${WEB_UNIT}"; then
+                    log "Web dashboard running on http://127.0.0.1:8765"
+                else
+                    warn "Could not start ${WEB_UNIT}; see 'systemctl --user status ${WEB_UNIT}'"
+                fi
+                ;;
+        esac
+        info "Sessions and the dashboard stop at logout unless lingering is on:"
+        info "  loginctl enable-linger \"\${USER}\""
+    else
+        warn "No systemd user manager here; run the dashboard in the foreground with:"
+        warn "  ai-sandbox web"
+    fi
+
+    info "The access token is generated on first start in:"
+    info "  ${HOME}/.config/ai-sandbox/web-token"
+    info "Open http://127.0.0.1:8765/ and paste it, or use:"
+    info "  xdg-open \"http://127.0.0.1:8765/?t=\$(cat ~/.config/ai-sandbox/web-token)\""
 }
 
 # --- Ensure host directories for agent configs exist -------------------------
@@ -193,6 +327,12 @@ ensure_host_dirs() {
 # AI_SANDBOX_OPENCODE_API_KEY=...
 # AI_SANDBOX_OPENCODE_MODEL=glm-5.2:cloud
 # AI_SANDBOX_OPENCODE_BASE_URL=https://ollama.com/v1
+#
+# Web dashboard (loopback only; see README "Web UI")
+# AI_SANDBOX_WEB_ADDR=127.0.0.1
+# AI_SANDBOX_WEB_PORT=8765
+# Colon-separated roots a dashboard-started session may mount from ($HOME by default)
+# AI_SANDBOX_WEB_ROOTS=/home/you/projects
 EOF
         chmod 600 "$env_file"
     fi
@@ -394,7 +534,64 @@ do_uninstall() {
 
     local removed=0
 
-    # 1. Remove binaries from ~/.local/bin
+    # 1. Stop and remove the web dashboard service.
+    #    Done first so nothing is holding attachments open while the rest goes.
+    if [[ -f "${SYSTEMD_USER_DIR}/${WEB_UNIT}" ]]; then
+        if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment &>/dev/null; then
+            systemctl --user disable --now "${WEB_UNIT}" >/dev/null 2>&1 || true
+        fi
+        rm -f "${SYSTEMD_USER_DIR}/${WEB_UNIT}"
+        if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment &>/dev/null; then
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+        fi
+        log "Removed and disabled ${WEB_UNIT}"
+        removed=1
+    fi
+
+    # 2. Offer to remove leftover web sessions.
+    #    Only --web sessions can outlive the shell that started them, so this is
+    #    the one place an uninstall can leave containers running.
+    if command -v podman >/dev/null 2>&1; then
+        # `ps -q` and an inspect each, and the exit status is checked: a
+        # --format template over the listing addresses Go struct fields rather
+        # than the JSON keys of the same output, and an unchecked failure would
+        # read as "no sessions" -- silently skipping the one step of the
+        # uninstall that stops containers able to outlive this shell.
+        local -a ids web_sessions
+        local raw name id
+        if ! raw="$(podman ps -a --filter label=ai-sandbox.web=1 -q 2>&1)"; then
+            warn "Could not list sandbox sessions: ${raw}"
+            warn "Any still running must be removed by hand: podman rm -f <name>"
+            raw=""
+        fi
+        mapfile -t ids <<<"$raw"
+        web_sessions=()
+        for id in "${ids[@]}"; do
+            [[ -n "$id" ]] || continue
+            name="$(podman inspect --format \
+                '{{index .Config.Labels "ai-sandbox.session"}}' "$id" 2>/dev/null)" || continue
+            [[ -n "$name" ]] && web_sessions+=("$name")
+        done
+        if [[ ${#web_sessions[@]} -gt 0 ]]; then
+            echo ""
+            info "These sandbox sessions are still present:"
+            printf '    %s\n' "${web_sessions[@]}"
+            echo -en "\n  Remove them? [y/N] "
+            read -r answer
+            if [[ "$answer" =~ ^[yY]$ ]]; then
+                if podman rm -f "${ids[@]}" >/dev/null 2>&1; then
+                    log "Removed leftover sandbox sessions"
+                    removed=1
+                else
+                    warn "Could not remove some sessions — check: podman ps -a"
+                fi
+            else
+                info "Left running — stop them later with: podman rm -f <name>"
+            fi
+        fi
+    fi
+
+    # 3. Remove binaries from ~/.local/bin
     if [[ -f "${INSTALL_DIR}/ai-sandbox" ]]; then
         rm -f "${INSTALL_DIR}/ai-sandbox"
         log "Removed ${INSTALL_DIR}/ai-sandbox"
@@ -415,14 +612,20 @@ do_uninstall() {
         removed=1
     fi
 
-    # 2. Remove build data from ~/.local/share/ai-sandbox
+    if [[ -f "${INSTALL_DIR}/ai-sandbox-web" ]]; then
+        rm -f "${INSTALL_DIR}/ai-sandbox-web"
+        log "Removed ${INSTALL_DIR}/ai-sandbox-web"
+        removed=1
+    fi
+
+    # 4. Remove build data from ~/.local/share/ai-sandbox
     if [[ -d "${DATA_DIR}" ]]; then
         rm -rf "${DATA_DIR}"
         log "Removed ${DATA_DIR}"
         removed=1
     fi
 
-    # 3. Container images
+    # 5. Container images
     if command -v podman >/dev/null 2>&1; then
         local images=()
         for img in agent-base agent-claude agent-codex agent-cursor agent-opencode; do
@@ -450,7 +653,7 @@ do_uninstall() {
         fi
     fi
 
-    # 4. Config directory
+    # 6. Config directory
     if [[ -d "${HOME}/.config/ai-sandbox" ]]; then
         echo ""
         warn "Found config directory: ~/.config/ai-sandbox/"
@@ -465,7 +668,7 @@ do_uninstall() {
         fi
     fi
 
-    # 5. Clean PATH line from shell profile
+    # 7. Clean PATH line from shell profile
     local profile
     profile="$(detect_shell_profile)"
     if [[ -f "$profile" ]] && grep -qF '# Added by ai-sandbox install.sh' "$profile" 2>/dev/null; then
@@ -556,7 +759,33 @@ else
 fi
 echo ""
 
-# 5. PATH check
+# 5. Web dashboard
+if [[ -z "$DO_WEB" ]]; then
+    if [[ -t 0 ]] && command -v python3 >/dev/null 2>&1; then
+        echo -en "  Install the web dashboard (browser access to sessions)? [Y/n] "
+        read -r web_answer
+        case "$web_answer" in
+            [nN]*) DO_WEB=false ;;
+            *)     DO_WEB=true ;;
+        esac
+    else
+        DO_WEB=false
+    fi
+fi
+
+if [[ "$DO_WEB" == true ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        echo ""
+        install_web || true
+    else
+        warn "Skipping the web dashboard: python3 is not installed"
+    fi
+else
+    info "Web dashboard not installed — add it later with: ./install.sh --with-web"
+fi
+echo ""
+
+# 6. PATH check
 if ! check_path; then
     offer_path_fix
 fi

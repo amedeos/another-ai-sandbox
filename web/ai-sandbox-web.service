@@ -1,0 +1,28 @@
+[Unit]
+Description=ai-sandbox web dashboard (loopback only)
+Documentation=man:ai-sandbox
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ai-sandbox-web --addr 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=2
+
+# A user unit does not inherit the login shell's PATH, and both podman and
+# ai-sandbox have to be resolvable.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AI_SANDBOX_WEB_DIR=%h/.local/share/ai-sandbox/web
+Environment=PYTHONUNBUFFERED=1
+
+# NoNewPrivileges MUST stay off. Rootless podman execs the setuid helpers
+# newuidmap and newgidmap, which no_new_privs blocks outright, so "hardening"
+# this line breaks every sandbox the dashboard starts. PrivateTmp and
+# SystemCallFilter are omitted for the same class of reason: podman needs its
+# own runtime paths and unshare/clone3.
+NoNewPrivileges=no
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

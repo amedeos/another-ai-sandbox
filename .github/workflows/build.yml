@@ -59,6 +59,20 @@ jobs:
             --file opencode/Containerfile \
             opencode/
 
+      - name: Smoke test – zellij in the base image
+        run: |
+          podman run --rm --entrypoint zellij \
+            localhost/agent-base:latest --version
+
+      # With AI_SANDBOX_WEB unset the supervisor must be a transparent exec,
+      # which is what keeps non-web sessions unchanged.
+      - name: Smoke test – supervisor passthrough
+        run: |
+          out=$(podman run --rm \
+            --entrypoint /usr/local/bin/ai-sandbox-supervise \
+            localhost/agent-base:latest echo passthrough-ok)
+          [[ "$out" == "passthrough-ok" ]]
+
       - name: Smoke test – claude
         run: podman run --rm localhost/agent-claude:latest --version
 

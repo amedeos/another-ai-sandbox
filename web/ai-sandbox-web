@@ -1,0 +1,1162 @@
+#!/usr/bin/env python3
+# =============================================================================
+# ai-sandbox-web - loopback web dashboard for ai-sandbox --web sessions
+#
+# Lists, starts and stops sandboxes, and serves a browser terminal attached to
+# the same zellij session a terminal client would attach to, so both are live
+# read/write clients of one session.
+#
+# Deliberate constraints:
+#   * Python standard library only. This project installs no runtime
+#     dependencies, and adding a wheel supply chain to a tool whose purpose is
+#     to reduce the trust surface would be self-defeating.
+#   * No container port is ever published, and no host<->container network
+#     plumbing is introduced. Containers are reached through `podman exec`,
+#     exactly as a human at a terminal reaches them.
+#   * Sessions are started by invoking `ai-sandbox`, never by building a
+#     `podman run` command here, so container hardening stays single-sourced
+#     and cannot be weakened from the web side.
+#
+# Usage: ai-sandbox-web [--addr ADDR] [--port PORT]
+#        ai-sandbox web [...]        (same thing, via the wrapper)
+# =============================================================================
+
+import argparse
+import base64
+import binascii
+import fcntl
+import hmac
+import http.server
+import json
+import os
+import re
+import secrets
+import select
+import shlex
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+import urllib.parse
+from pathlib import Path
+
+# --- Configuration ------------------------------------------------------------
+
+DEFAULT_ADDR = "127.0.0.1"
+DEFAULT_PORT = 8765
+
+HOME = Path(os.path.expanduser("~"))
+TOKEN_FILE = Path(os.environ.get("AI_SANDBOX_WEB_TOKEN_FILE",
+                                 HOME / ".config" / "ai-sandbox" / "web-token"))
+WEB_DIR = Path(os.environ.get("AI_SANDBOX_WEB_DIR",
+                              HOME / ".local" / "share" / "ai-sandbox" / "web"))
+AI_SANDBOX = os.environ.get("AI_SANDBOX_BIN", str(HOME / ".local" / "bin" / "ai-sandbox"))
+PODMAN = os.environ.get("AI_SANDBOX_PODMAN", "podman")
+
+# Directories a session may be started on. A compromised agent that somehow
+# reached this server must not be able to ask for a sandbox over "/".
+ALLOWED_ROOTS = [Path(p).resolve() for p in
+                 os.environ.get("AI_SANDBOX_WEB_ROOTS", str(HOME)).split(":") if p]
+
+AGENTS = ("claude", "claude-vertex", "codex", "cursor", "opencode")
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
+CPUS_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+SIZE_RE = re.compile(r"^[0-9]+[bkmg]$")
+# A --block-cmd rule: a binary, a colon, and optionally the argument to match.
+# The argument half may carry spaces ("git:push --force"), so rules are taken
+# one per line rather than split on whitespace. Nothing here reaches a shell --
+# each rule is one argv element -- but the charset stays narrow anyway, because
+# this is browser input on its way to a program running under sudo.
+BLOCK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}:[A-Za-z0-9 ._+=/@:,-]{0,128}$")
+
+LABEL_PREFIX = "ai-sandbox."
+MAX_PASTE_BYTES = 10 * 1024 * 1024
+MAX_BODY_BYTES = 1 * 1024 * 1024
+IDLE_REAP_SECONDS = 30
+HEARTBEAT_SECONDS = 15
+
+# Only formats an agent CLI is likely to accept as an image path.
+IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def log(msg):
+    print(f"[ai-sandbox-web] {msg}", flush=True)
+
+
+# --- Token and authentication --------------------------------------------------
+
+def load_or_create_token():
+    """Read the bearer token, generating a 0600 one on first start.
+
+    Generated here rather than by install.sh so the installer never handles
+    secret material.
+    """
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text().strip()
+        if token:
+            mode = TOKEN_FILE.stat().st_mode & 0o777
+            if mode != 0o600:
+                log(f"warning: {TOKEN_FILE} has mode {mode:o}, tightening to 600")
+                TOKEN_FILE.chmod(0o600)
+            return token
+
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    # Create with the right mode from the start; never world-readable, even
+    # momentarily.
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(token + "\n")
+    log(f"generated a new access token in {TOKEN_FILE}")
+    return token
+
+
+# --- Podman interface ----------------------------------------------------------
+
+def same_secret(supplied, expected):
+    """Constant-time compare of a token that arrived over the wire.
+
+    hmac.compare_digest raises TypeError on a str with any non-ASCII character,
+    and headers reach us latin-1 decoded, so a stale or mangled cookie would
+    otherwise take the handler down with a traceback and no response at all --
+    the dashboard looking dead rather than sending the reader to the login page.
+    Comparing the encoded bytes gives a plain mismatch instead.
+    """
+    try:
+        return hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"),
+                                   expected.encode("utf-8", "surrogateescape"))
+    except (AttributeError, UnicodeError):
+        return False
+
+
+def podman(*args, timeout=20, check=False):
+    return subprocess.run([PODMAN, *args], capture_output=True, text=True,
+                          timeout=timeout, check=check)
+
+
+def label_int(labels, key, default):
+    """A numeric label, or the default. Labels are attacker-controllable input:
+    anything can set ai-sandbox.cols on a container of its own, and an
+    unhandled ValueError here would take the whole listing down with a 500."""
+    try:
+        return int(labels.get(f"{LABEL_PREFIX}{key}") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def primary_hostdir(labels):
+    """The host path the session was started on, not the path inside it.
+
+    ai-sandbox records mounts as `name=/host/path;name2=/host/path2`, the first
+    being the working directory. Everything else about a session is shown in
+    the user's terms, and /workspace/<name> is an implementation detail of the
+    container -- it is not a path they can act on.
+    """
+    mounts = labels.get(f"{LABEL_PREFIX}mounts", "")
+    first = mounts.split(";", 1)[0]
+    if "=" in first:
+        return first.split("=", 1)[1]
+    return labels.get(f"{LABEL_PREFIX}workdir", "")
+
+
+def list_sessions():
+    """Every running container carrying the opt-in label, with its parameters.
+
+    Containers started without --web have no ai-sandbox.* labels at all, so
+    they are not merely filtered out here -- there is nothing to filter.
+
+    `--format json` rather than a Go template: template fields are struct
+    names, not the JSON keys they are documented under (`.Id` is the JSON tag
+    of a field actually called `ID`), and one wrong name makes podman fail the
+    whole invocation. That failure used to surface as an empty dashboard,
+    because nothing here looked at the exit status -- hence the log below.
+    """
+    proc = podman("ps", "--filter", f"label={LABEL_PREFIX}web=1", "--format", "json")
+    if proc.returncode != 0:
+        log(f"podman ps failed ({proc.returncode}): {proc.stderr.strip()}")
+        return []
+    try:
+        containers = json.loads(proc.stdout or "[]") or []
+    except json.JSONDecodeError as exc:
+        log(f"could not parse podman ps output: {exc}")
+        return []
+
+    sessions = []
+    for container in containers:
+        labels = container.get("Labels") or {}
+        name = labels.get(f"{LABEL_PREFIX}session", "")
+        if not SESSION_RE.match(name):
+            continue
+        sessions.append({
+            "session": name,
+            "agent": labels.get(f"{LABEL_PREFIX}agent", ""),
+            "workdir": labels.get(f"{LABEL_PREFIX}workdir", ""),
+            "hostdir": primary_hostdir(labels),
+            "mounts": labels.get(f"{LABEL_PREFIX}mounts", ""),
+            "cpus": labels.get(f"{LABEL_PREFIX}cpus", ""),
+            "memory": labels.get(f"{LABEL_PREFIX}memory", ""),
+            "network": labels.get(f"{LABEL_PREFIX}network", ""),
+            "blocked": labels.get(f"{LABEL_PREFIX}blocked", ""),
+            "created": labels.get(f"{LABEL_PREFIX}created", ""),
+            "cols": label_int(labels, "cols", 120),
+            "rows": label_int(labels, "rows", 32),
+            "id": str(container.get("Id") or "")[:12],
+            "state": str(container.get("State") or ""),
+        })
+    sessions.sort(key=lambda s: s["created"])
+    return sessions
+
+
+def resolve_container(session):
+    """Map a caller-supplied session name to its container, or None.
+
+    This is the single choke point for anything acting on a name from a
+    request. It re-checks the opt-in label every time rather than trusting a
+    listing, so a session started without --web stays unreachable even if a
+    caller guesses its name.
+    """
+    if not SESSION_RE.match(session or ""):
+        return None
+    name = f"sandbox-{session}"
+    proc = podman("inspect", "--format",
+                  '{{index .Config.Labels "ai-sandbox.web"}}/'
+                  '{{index .Config.Labels "ai-sandbox.session"}}/{{.State.Running}}',
+                  name)
+    if proc.returncode != 0:
+        return None
+    if proc.stdout.strip() != f"1/{session}/true":
+        return None
+    return name
+
+
+def session_geometry(session):
+    proc = podman("inspect", "--format",
+                  '{{index .Config.Labels "ai-sandbox.cols"}}/'
+                  '{{index .Config.Labels "ai-sandbox.rows"}}',
+                  f"sandbox-{session}")
+    try:
+        cols, rows = proc.stdout.strip().split("/")
+        return int(cols), int(rows)
+    except ValueError:
+        return 120, 32
+
+
+def zellij_client_count(container, session):
+    """Number of clients attached to the session, or None if unknown.
+
+    `zellij action list-clients` prints a header row plus one row per client.
+    """
+    proc = podman("exec", container, "zellij", "--session", session,
+                  "action", "list-clients", timeout=10)
+    if proc.returncode != 0:
+        return None
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    return max(0, len(lines) - 1)
+
+
+MAX_DIR_ENTRIES = 500
+
+
+def containing_root(path):
+    """The allowed root that contains `path` (or is `path`), else None."""
+    for root in ALLOWED_ROOTS:
+        if path == root or root in path.parents:
+            return root
+    return None
+
+
+def hidden_below(path, root):
+    """Does any component of `path` under `root` start with a dot?
+
+    Being under $HOME is not enough to be safe to mount: ~/.ssh, ~/.gnupg and
+    ~/.config/ai-sandbox all are, and the last one holds this dashboard's own
+    access token and the API-key file. A sandbox gets its directories
+    read-write, so mounting one hands a compromised agent the host -- and the
+    threat model this validation exists for is exactly an agent that reached
+    this server. The terminal can still do it: there the person typing chose.
+    """
+    return any(part.startswith(".") for part in path.relative_to(root).parts)
+
+
+def complete_dirs(typed):
+    """Immediate subdirectories matching what the user has typed so far.
+
+    One level, never a walk: the cost of a request is one `scandir` of the
+    directory being looked at, whatever the size of the tree below it.
+
+    Matching ignores case, because that is a typing convenience; the paths
+    returned are the exact names on disk, because resolving them is not. On a
+    case-sensitive filesystem `~/Repos` and `~/repos` are two directories, and
+    it is not this function's place to choose between them -- so a match that
+    also agrees on case sorts first.
+    """
+    expanded = os.path.expanduser(typed or str(ALLOWED_ROOTS[0]) + "/")
+    # Split the string rather than asking pathlib for .parent/.name: pathlib
+    # normalises a trailing "." away, so "~/repos/." would be read as a request
+    # for the children of "~" -- a level higher than what was typed.
+    if expanded.endswith("/"):
+        parent_str, partial = expanded, ""
+    else:
+        parent_str, _, partial = expanded.rpartition("/")
+    parent = Path(parent_str or "/")
+
+    try:
+        parent = parent.resolve()
+    except OSError:
+        return None, "no such directory"
+    if not parent.is_dir():
+        return None, "no such directory"
+    root = containing_root(parent)
+    if root is None:
+        allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
+        return None, f"outside the allowed roots: {allowed}"
+    if hidden_below(parent, root):
+        return None, "hidden directories are not offered here"
+
+    lowered = partial.lower()
+    names = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                name = entry.name
+                # Never offered, because they cannot be mounted from here --
+                # suggesting a path the start API will refuse is worse than
+                # not suggesting it.
+                if name.startswith("."):
+                    continue
+                if not name.lower().startswith(lowered):
+                    continue
+                try:
+                    if entry.is_dir():          # follows symlinks, as a mount would
+                        names.append(name)
+                except OSError:
+                    continue
+    except OSError as exc:
+        return None, f"could not read the directory: {exc.strerror or exc}"
+
+    names.sort(key=lambda n: (not n.startswith(partial), n.lower(), n))
+    truncated = len(names) > MAX_DIR_ENTRIES
+    return {
+        "parent": str(parent),
+        "dirs": [str(parent / n) for n in names[:MAX_DIR_ENTRIES]],
+        "truncated": truncated,
+    }, None
+
+
+def validate_start_spec(body):
+    """Turn a request body into an argv for ai-sandbox, or raise ValueError.
+
+    Nothing from the request is ever concatenated into a shell string; each
+    value is validated and passed as its own argv element. A gap here would
+    turn "the agent is sandboxed" into "the agent picks its own sandbox".
+    """
+    agent = body.get("agent")
+    if agent not in AGENTS:
+        raise ValueError(f"unknown agent (expected one of: {', '.join(AGENTS)})")
+
+    dirs = body.get("dirs") or []
+    if not isinstance(dirs, list) or not dirs:
+        raise ValueError("at least one directory is required")
+    if len(dirs) > 8:
+        raise ValueError("too many directories")
+
+    resolved = []
+    for entry in dirs:
+        if not isinstance(entry, str) or not entry:
+            raise ValueError("invalid directory")
+        path = Path(os.path.expanduser(entry)).resolve()
+        if not path.is_dir():
+            raise ValueError(f"not a directory: {entry}")
+        # Must be strictly inside an allowed root -- the root itself is
+        # refused, so a whole home directory cannot be handed to an agent by
+        # accident -- and must not reach into a dot directory.
+        root = containing_root(path)
+        if root is None or path == root:
+            allowed = ", ".join(str(r) for r in ALLOWED_ROOTS)
+            raise ValueError(f"directory must be below one of: {allowed}")
+        if hidden_below(path, root):
+            raise ValueError("hidden directories cannot be mounted from the "
+                             "dashboard: they hold ssh keys, this dashboard's "
+                             "own token and the API-key file. Start such a "
+                             "session from a terminal if you mean it.")
+        resolved.append(path)
+
+    argv = [AI_SANDBOX, agent, str(resolved[0])]
+    for extra in resolved[1:]:
+        argv += ["--dir", str(extra)]
+
+    name = body.get("name") or ""
+    if name:
+        if not SESSION_RE.match(name):
+            raise ValueError("invalid session name")
+        argv += ["--web-name", name]
+
+    cpus = str(body.get("cpus") or "")
+    if cpus:
+        if not CPUS_RE.match(cpus):
+            raise ValueError("invalid cpus")
+        argv += ["--cpus", cpus]
+
+    memory = str(body.get("memory") or "")
+    if memory:
+        if not SIZE_RE.match(memory):
+            raise ValueError("invalid memory (use e.g. 4g, 512m)")
+        argv += ["--memory", memory]
+
+    cols = int(body.get("cols") or 120)
+    rows = int(body.get("rows") or 32)
+    if not (40 <= cols <= 500 and 10 <= rows <= 200):
+        raise ValueError("invalid session size")
+    argv += ["--web-size", f"{cols}x{rows}"]
+
+    if body.get("network_off"):
+        argv.append("--network-off")
+
+    # --block-cmd needs sudo for the BPF loader, which cannot prompt from a
+    # systemd user service. That is a question of whether *this* host grants
+    # passwordless sudo for it, which ai-sandbox already answers with a clear
+    # error, so the rules are passed on and its answer is reported rather than
+    # refused here on a guess.
+    blocked = body.get("blocked") or []
+    if not isinstance(blocked, list) or len(blocked) > 16:
+        raise ValueError("invalid blocked rules (a list, at most 16)")
+    for rule in blocked:
+        if not isinstance(rule, str) or not BLOCK_RE.match(rule):
+            raise ValueError(f"invalid block rule: {rule!r} "
+                             "(expected <binary>:<argument>, e.g. git:push)")
+        argv += ["--block-cmd", rule]
+
+    argv += ["--web", "--non-interactive"]
+    return argv
+
+
+def start_session(body):
+    argv = validate_start_spec(body)
+    # State the terminal the session will actually be driven from. This process
+    # is a systemd user service, so its own TERM is absent or "dumb" and says
+    # nothing about the client; the browser terminal is xterm.js, which handles
+    # 256 colours and truecolor. The agent inherits this through `podman run`.
+    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, check=False, env=env)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, "\n".join(detail[-6:]) or "ai-sandbox failed"
+    # The script prints the session name on its own last line.
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    name = lines[-1] if lines else ""
+    if not SESSION_RE.match(name):
+        return None, "could not determine the new session name"
+    return name, None
+
+
+# --- PTY attachments -----------------------------------------------------------
+
+class Attachment:
+    """One browser client, holding a `podman exec ... zellij attach` on a PTY.
+
+    Reaping these is correctness, not tidiness: a leaked exec leaves a zellij
+    client attached forever, which both makes the sole-client check lie and
+    pins the shared session to that phantom's geometry.
+    """
+
+    def __init__(self, session, container, cols, rows):
+        self.id = secrets.token_urlsafe(16)
+        self.session = session
+        self.container = container
+        self.cols = cols
+        self.rows = rows
+        self.lock = threading.Lock()
+        self.last_seen = time.time()
+        self.closed = False
+
+        self.master, slave = os.openpty()
+        self.set_size(cols, rows)
+        # The zellij client records its own pid inside the container, because
+        # that is the only handle this side gets on it: `podman exec` reports
+        # nothing about the process it started, and killing the local client
+        # does not kill it (see close()).
+        self.pidfile = f"/tmp/ai-sandbox-attach-{self.id}.pid"
+        self.proc = subprocess.Popen(
+            [PODMAN, "exec", "-i", "-t",
+             "-e", "TERM=xterm-256color",
+             "-e", "COLORTERM=truecolor",
+             container, "/bin/sh", "-c",
+             (f"echo $$ > {shlex.quote(self.pidfile)}; "
+              f"exec zellij attach {shlex.quote(session)}")],
+            stdin=slave, stdout=slave, stderr=slave,
+            start_new_session=True, close_fds=True,
+        )
+        os.close(slave)
+
+    def set_size(self, cols, rows):
+        with self.lock:
+            if self.closed:
+                raise OSError("attachment is closed")
+            self.cols, self.rows = cols, rows
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
+
+    def write(self, data):
+        with self.lock:
+            if not self.closed:
+                os.write(self.master, data)
+
+    def read(self, timeout=1.0):
+        # Every touch of the fd happens under the lock, like write(): the
+        # reaper closes it from another thread, and reading a closed fd is not
+        # merely an error -- the number can already have been reassigned to a
+        # freshly accepted socket, so the read would take bytes from an
+        # unrelated connection.
+        #
+        # Polled in short slices rather than waiting the full timeout inside
+        # the lock, because write() takes the same lock: blocking there for a
+        # second on an idle session would put that second between a keystroke
+        # and the agent seeing it.
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                if self.closed:
+                    return None
+                try:
+                    ready, _, _ = select.select([self.master], [], [], 0)
+                    if ready:
+                        return os.read(self.master, 65536)
+                except OSError:
+                    return None  # PTY gone
+            if time.monotonic() >= deadline:
+                return b""
+            time.sleep(0.01)
+
+    def alive(self):
+        return not self.closed and self.proc.poll() is None
+
+    def close(self):
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+        # Detach the client *inside* the container first. Killing the local
+        # `podman exec` only tears down this end of the exec session: the
+        # process it started keeps running in the container, so the zellij
+        # client outlives the browser that asked for it and stays attached --
+        # pinning the shared session to a phantom's geometry and making the
+        # sole-client check lie. Verified against zellij 0.45.1: SIGTERM to the
+        # client detaches it in well under a second and leaves the session and
+        # every other client untouched, which is what `on_force_close "detach"`
+        # in base/zellij.kdl is there to guarantee.
+        proc = podman("exec", self.container, "/bin/sh", "-c",
+                      f'kill -TERM "$(cat {shlex.quote(self.pidfile)} 2>/dev/null)" 2>/dev/null; '
+                      f"rm -f {shlex.quote(self.pidfile)}", timeout=10)
+        if proc.returncode != 0:
+            # Not fatal -- the local kill below still runs -- but it is the one
+            # step here that can fail without any visible effect, and a phantom
+            # client is invisible from outside the container.
+            log(f"detaching {self.session} in {self.container} failed "
+                f"({proc.returncode}): {proc.stderr.strip()}")
+        try:
+            self.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+
+        # Then the local end. Whole process group: `podman exec` may have
+        # children, and this is also the fallback for a close that raced the
+        # pidfile being written.
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            self.proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            os.close(self.master)
+        except OSError:
+            pass
+
+
+ATTACHMENTS = {}
+ATTACH_LOCK = threading.Lock()
+
+
+def reap_attachments():
+    """Close attachments whose browser has gone away."""
+    while True:
+        time.sleep(5)
+        now = time.time()
+        with ATTACH_LOCK:
+            stale = [a for a in ATTACHMENTS.values()
+                     if not a.alive() or now - a.last_seen > IDLE_REAP_SECONDS]
+            for att in stale:
+                ATTACHMENTS.pop(att.id, None)
+        for att in stale:
+            att.close()
+
+
+# --- HTTP handler --------------------------------------------------------------
+
+SECURITY_HEADERS = {
+    # Everything is served from disk; there is no CDN to allow, which is the
+    # whole reason install.sh vendors xterm.js.
+    "Content-Security-Policy":
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
+
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "ai-sandbox-web"
+    sys_version = ""
+
+    # --- plumbing ---
+
+    def log_message(self, fmt, *args):
+        # Never echo the query string or headers: the bootstrap URL carries the
+        # token.
+        #
+        # getattr, because http.server logs errors from before the request line
+        # has been parsed -- a malformed request sets neither attribute, and an
+        # AttributeError here kills the handler thread with the 400 still
+        # unwritten, so the client gets nothing at all.
+        path = getattr(self, "path", "-")
+        log(f"{getattr(self, 'command', '-')} {path.split('?', 1)[0]} "
+            f"-> {args[1] if len(args) > 1 else ''}")
+
+    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8", extra=None):
+        if isinstance(body, str):
+            body = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _json(self, code, obj, extra=None):
+        self._send(code, json.dumps(obj), "application/json; charset=utf-8",
+                   {"Cache-Control": "no-store", **(extra or {})})
+
+    def _body(self, limit=MAX_BODY_BYTES):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > limit:
+            # The body has to leave the socket even when it is refused: this is
+            # a keep-alive connection, and whatever is left would be parsed as
+            # the next request, desynchronising everything the browser sends
+            # afterwards. Closing is simpler and cheaper than draining
+            # megabytes we have already decided not to look at.
+            self.close_connection = True
+            return None
+        return self.rfile.read(length) if length else b""
+
+    # --- security checks ---
+
+    def _host_ok(self):
+        """Reject any Host we did not bind, which is the DNS-rebinding defence.
+
+        This is not what stops a container reaching the dashboard -- a process
+        in a container can send any Host header. The token does that.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
+        hostname = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
+        return hostname in ("127.0.0.1", "localhost", "::1")
+
+    def _origin_ok(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True  # not a browser-initiated cross-origin request
+        try:
+            parsed = urllib.parse.urlparse(origin)
+        except ValueError:
+            return False
+        return parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+    def _cookie_token(self):
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "ai_sandbox_web":
+                return value
+        return ""
+
+    def _authed(self, allow_cookie=True):
+        expected = self.server.token
+        header = self.headers.get("Authorization") or ""
+        if header.startswith("Bearer ") and same_secret(header[7:].strip(), expected):
+            return True
+        return bool(allow_cookie and same_secret(self._cookie_token(), expected))
+
+    def _guard(self, allow_cookie=True):
+        """Common gate. Returns True when the request may proceed."""
+        if not self._host_ok():
+            self._send(403, "forbidden host\n")
+            return False
+        if not self._origin_ok():
+            self._send(403, "forbidden origin\n")
+            return False
+        if not self._authed(allow_cookie=allow_cookie):
+            self._send(401, "unauthorized\n", extra={"Cache-Control": "no-store"})
+            return False
+        return True
+
+    # --- routes ---
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+
+        if path == "/":
+            # Bootstrap: ?t=<token> exchanges the token for a session cookie,
+            # which is the only way EventSource can authenticate later since it
+            # cannot set request headers.
+            params = urllib.parse.parse_qs(query)
+            # strip(), because the login form submits the field verbatim and a
+            # token pasted with a stray space or newline would otherwise fail
+            # the compare with no visible reason. The token is urlsafe base64,
+            # so no real token differs from another only by surrounding space.
+            supplied = (params.get("t") or [""])[0].strip()
+            if supplied and self._host_ok() and same_secret(supplied, self.server.token):
+                self._send(303, b"", extra={
+                    "Location": "/",
+                    "Set-Cookie": (f"ai_sandbox_web={self.server.token}; Path=/; "
+                                   "HttpOnly; SameSite=Strict"),
+                })
+                return
+            if not self._host_ok():
+                self._send(403, "forbidden host\n")
+                return
+            if not self._authed():
+                # A bare 401 body is a poor first impression; hand the browser a
+                # form that redirects to the bootstrap URL instead.
+                self._serve_static("login.html", status=401)
+                return
+            self._serve_static("index.html")
+            return
+
+        if path.startswith("/static/"):
+            if not self._guard():
+                return
+            self._serve_static(path[len("/static/"):])
+            return
+
+        if path == "/api/sessions":
+            if not self._guard():
+                return
+            self._json(200, {"sessions": list_sessions()})
+            return
+
+        if path == "/api/dirs":
+            if not self._guard():
+                return
+            typed = (urllib.parse.parse_qs(query).get("path") or [""])[0]
+            if len(typed) > 4096:
+                self._json(400, {"error": "path too long"})
+                return
+            result, error = complete_dirs(typed)
+            if error:
+                self._json(403 if "allowed roots" in error else 404, {"error": error})
+                return
+            self._json(200, result)
+            return
+
+        match = re.fullmatch(r"/api/attach/([A-Za-z0-9_-]{1,64})/stream", path)
+        if match:
+            # Cookie-authenticated: EventSource cannot send an Authorization
+            # header. SameSite=Strict plus the Origin check cover the gap.
+            if not self._guard():
+                return
+            self._stream(match.group(1))
+            return
+
+        self._send(404, "not found\n")
+
+    def do_POST(self):
+        path = self.path.partition("?")[0]
+
+        # State-changing endpoints additionally require a header no simple
+        # cross-origin form can set.
+        if not self._guard():
+            return
+        if self.headers.get("X-AI-Sandbox") != "1":
+            self._send(403, "missing X-AI-Sandbox header\n")
+            return
+
+        if path == "/api/sessions":
+            self._start_session()
+            return
+
+        match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]{1,48})/(stop|attach)", path)
+        if match:
+            session, action = match.group(1), match.group(2)
+            if action == "stop":
+                self._stop_session(session)
+            else:
+                self._attach_session(session)
+            return
+
+        match = re.fullmatch(r"/api/attach/([A-Za-z0-9_-]{1,64})/(input|resize|paste)", path)
+        if match:
+            att = self._attachment(match.group(1))
+            if att is None:
+                return
+            {"input": self._input, "resize": self._resize,
+             "paste": self._paste}[match.group(2)](att)
+            return
+
+        self._send(404, "not found\n")
+
+    def do_DELETE(self):
+        if not self._guard():
+            return
+        match = re.fullmatch(r"/api/attach/([A-Za-z0-9_-]{1,64})", self.path.partition("?")[0])
+        if not match:
+            self._send(404, "not found\n")
+            return
+        with ATTACH_LOCK:
+            att = ATTACHMENTS.pop(match.group(1), None)
+        if att:
+            att.close()
+        self._json(200, {"ok": True})
+
+    # --- handlers ---
+
+    def _serve_static(self, relative, status=200):
+        target = (WEB_DIR / "static" / relative).resolve()
+        root = (WEB_DIR / "static").resolve()
+        if root not in target.parents or not target.is_file():
+            self._send(404, "not found\n")
+            return
+        ctype = STATIC_TYPES.get(target.suffix, "application/octet-stream")
+        self._send(status, target.read_bytes(), ctype,
+                   {"Cache-Control": "no-store"})
+
+    def _start_session(self):
+        raw = self._body()
+        if raw is None:
+            self._send(413, "body too large\n")
+            return
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._json(400, {"error": "invalid JSON"})
+            return
+        try:
+            name, error = start_session(body)
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        except subprocess.TimeoutExpired:
+            self._json(504, {"error": "ai-sandbox timed out"})
+            return
+        if error:
+            self._json(500, {"error": error})
+            return
+        self._json(201, {"session": name})
+
+    def _stop_session(self, session):
+        container = resolve_container(session)
+        if not container:
+            self._json(404, {"error": "no such web session"})
+            return
+        with ATTACH_LOCK:
+            doomed = [a for a in ATTACHMENTS.values() if a.session == session]
+            for att in doomed:
+                ATTACHMENTS.pop(att.id, None)
+        for att in doomed:
+            att.close()
+        proc = podman("stop", "-t", "10", container, timeout=30)
+        if proc.returncode != 0:
+            self._json(500, {"error": proc.stderr.strip() or "stop failed"})
+            return
+        self._json(200, {"ok": True})
+
+    def _attach_session(self, session):
+        container = resolve_container(session)
+        if not container:
+            self._json(404, {"error": "no such web session"})
+            return
+        cols, rows = session_geometry(session)
+        # Same belt and braces as `ai-sandbox attach`: on a slow machine the
+        # supervisor's startup-tip sweep can finish before zellij creates the
+        # tip pane, and it would then take the first keystroke.
+        podman("exec", container, "zellij", "--session", session,
+               "action", "hide-floating-panes", "--tab-id", "0", timeout=10)
+        try:
+            att = Attachment(session, container, cols, rows)
+        except OSError as exc:
+            self._json(500, {"error": f"could not attach: {exc}"})
+            return
+        with ATTACH_LOCK:
+            ATTACHMENTS[att.id] = att
+        self._json(201, {"attach_id": att.id, "cols": cols, "rows": rows})
+
+    def _attachment(self, attach_id):
+        with ATTACH_LOCK:
+            att = ATTACHMENTS.get(attach_id)
+        if att is None or not att.alive():
+            self._json(404, {"error": "no such attachment"})
+            return None
+        att.last_seen = time.time()
+        return att
+
+    def _input(self, att):
+        raw = self._body()
+        if raw is None:
+            self._send(413, "body too large\n")
+            return
+        try:
+            data = base64.b64decode(json.loads(raw)["d"], validate=True)
+        except (ValueError, KeyError, TypeError, binascii.Error):
+            self._json(400, {"error": "invalid input"})
+            return
+        try:
+            att.write(data)
+        except OSError:
+            self._json(410, {"error": "attachment closed"})
+            return
+        self._json(200, {"ok": True})
+
+    def _resize(self, att):
+        raw = self._body()
+        try:
+            body = json.loads(raw or b"{}")
+            cols, rows = int(body["cols"]), int(body["rows"])
+        except (ValueError, KeyError, TypeError):
+            self._json(400, {"error": "invalid size"})
+            return
+        if not (40 <= cols <= 500 and 10 <= rows <= 200):
+            self._json(400, {"error": "size out of range"})
+            return
+
+        # zellij sizes a shared session to its *smallest* client -- measured
+        # against 0.45.1: a 200x50 and a 100x30 client give a 100x29 session,
+        # and the session springs back to 200x50 when the small one leaves.
+        #
+        # Growing is therefore always safe: a client larger than the session
+        # shrinks nobody (a 200x50 plus a 300x80 client stays 200x50). Only
+        # shrinking can drag another client down, and only that needs to wait
+        # for this browser to be alone.
+        #
+        # Refusing to grow was worse than doing nothing: a browser adopts the
+        # geometry recorded when the session was created, so on a session made
+        # by the dashboard it attached at that default and became the smallest
+        # client -- pinning a terminal that was attached at four times the size.
+        if cols < att.cols or rows < att.rows:
+            count = zellij_client_count(att.container, att.session)
+            if count is not None and count > 1:
+                self._json(409, {"error": "another client is attached",
+                                 "cols": att.cols, "rows": att.rows})
+                return
+        try:
+            att.set_size(cols, rows)
+        except OSError as exc:
+            self._json(500, {"error": str(exc)})
+            return
+        self._json(200, {"ok": True, "cols": cols, "rows": rows})
+
+    def _paste(self, att):
+        raw = self._body(limit=MAX_PASTE_BYTES)
+        if raw is None:
+            self._json(413, {"error": "image too large (max 10 MB)"})
+            return
+        ext = None
+        for magic, candidate in IMAGE_MAGIC:
+            if raw.startswith(magic):
+                ext = candidate
+                break
+        if ext is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            ext = "webp"
+        if ext is None:
+            self._json(400, {"error": "not a supported image (PNG, JPEG, GIF or WebP)"})
+            return
+
+        # The name is generated here, never taken from the request, and passed
+        # as an argv element -- no shell is involved at any point.
+        path = f"/tmp/paste-{secrets.token_hex(8)}.{ext}"
+        proc = subprocess.run(
+            [PODMAN, "exec", "-i", att.container, "dd", f"of={path}",
+             "bs=64k", "status=none"],
+            input=raw, capture_output=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            self._json(500, {"error": "could not copy the image into the container"})
+            return
+
+        # Typed into this client's own PTY exactly as if the user had typed it.
+        # `zellij action write-chars` was tried first and rejected: it exits 0
+        # but delivers nothing when no client is attached.
+        try:
+            att.write(path.encode() + b" ")
+        except OSError:
+            self._json(410, {"error": "attachment closed"})
+            return
+        self._json(200, {"path": path})
+
+    def _client_gone(self):
+        """True once the browser's end of this stream has closed.
+
+        An SSE client never sends anything, so its socket only becomes readable
+        at EOF. Without this check the loop below only learns the browser is
+        gone when a write fails -- and on a session that is producing no output
+        that means waiting for the next heartbeat, with the attachment holding
+        a phantom zellij client pinning the session's geometry until then.
+        """
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            if not ready:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except BlockingIOError:
+            return False  # a spurious wakeup, not EOF
+        except OSError:
+            return True
+
+    def _stream(self, attach_id):
+        with ATTACH_LOCK:
+            att = ATTACHMENTS.get(attach_id)
+        if att is None:
+            self._send(404, "no such attachment\n")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        for key, value in SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.close_connection = True
+
+        last_beat = time.time()
+        try:
+            while att.alive():
+                if self._client_gone():
+                    break
+                att.last_seen = time.time()
+                chunk = att.read(timeout=1.0)
+                if chunk is None:
+                    break
+                if chunk:
+                    # Base64, not raw bytes: SSE is line-oriented, and terminal
+                    # output is full of newlines, carriage returns and NULs that
+                    # would break framing. It also makes a multi-byte UTF-8
+                    # sequence split across two reads harmless.
+                    payload = base64.b64encode(chunk).decode()
+                    self.wfile.write(b"data: " + payload.encode() + b"\n\n")
+                    self.wfile.flush()
+                elif time.time() - last_beat > HEARTBEAT_SECONDS:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    last_beat = time.time()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            # The browser is gone; drop the attachment so no phantom zellij
+            # client is left pinning the session's geometry.
+            with ATTACH_LOCK:
+                ATTACHMENTS.pop(att.id, None)
+            att.close()
+
+
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # A browser tab closing mid-stream is ordinary, not an error worth a
+        # traceback in the journal.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
+# --- Main ----------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ai-sandbox-web",
+        description="Loopback web dashboard for ai-sandbox --web sessions")
+    parser.add_argument("--addr", default=os.environ.get("AI_SANDBOX_WEB_ADDR", DEFAULT_ADDR))
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("AI_SANDBOX_WEB_PORT", DEFAULT_PORT)))
+    args = parser.parse_args()
+
+    if args.addr not in ("127.0.0.1", "::1", "localhost"):
+        # There is no TLS here and the token would cross the network in clear.
+        # Put a reverse proxy in front instead of widening the bind.
+        print(f"error: refusing to bind {args.addr}; this server is loopback only",
+              file=sys.stderr)
+        return 2
+
+    if not (WEB_DIR / "static" / "index.html").is_file():
+        print(f"error: web assets not found under {WEB_DIR}/static\n"
+              f"Run install.sh (or set AI_SANDBOX_WEB_DIR)", file=sys.stderr)
+        return 2
+
+    token = load_or_create_token()
+    server = Server((args.addr, args.port), Handler)
+    server.token = token
+
+    threading.Thread(target=reap_attachments, daemon=True).start()
+
+    # systemd stops and restarts this unit with SIGTERM, and the README tells
+    # people to. Python's default handler exits without unwinding, so the
+    # shutdown below would never run and every attached session would be left
+    # with a zellij client inside the container that nothing can now detach --
+    # which also makes the sole-client check lie for as long as the session
+    # lives. serve_forever() returns from shutdown(), so the finally: block
+    # does the closing either way.
+    def stop(signum, frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    url = f"http://{args.addr}:{server.server_address[1]}"
+    log(f"listening on {url}")
+    log(f"open {url}/?t=$(cat {TOKEN_FILE})")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        with ATTACH_LOCK:
+            attachments = list(ATTACHMENTS.values())
+            ATTACHMENTS.clear()
+        for att in attachments:
+            att.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

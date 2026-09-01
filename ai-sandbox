@@ -97,6 +97,19 @@ validate_cpus() {
     fi
 }
 
+# A session name becomes a zellij IPC socket filename, a podman container name
+# and a dashboard URL path segment, so keep it conservative.  The 48-character
+# cap is also what keeps the socket path inside its 107-byte limit.
+validate_session_name() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]]; then
+        echo -e "${RED}Error: invalid session name '${value}'.${NC}" >&2
+        echo "Use 1-48 characters: letters, digits, '_' or '-', starting with a letter or digit" >&2
+        echo "Examples: claude-myrepo, review_2, api-refactor" >&2
+        exit 1
+    fi
+}
+
 # podman's --cpus needs CFS bandwidth control (CONFIG_CFS_BANDWIDTH=y), which is what
 # creates cpu.max in a cgroup v2 hierarchy. Rootless additionally needs the 'cpu'
 # controller delegated to the user's cgroup, otherwise crun fails to apply the limit.
@@ -110,11 +123,333 @@ cpu_quota_supported() {
         grep -qw cpu "$(dirname "${base}")/cgroup.controllers" 2>/dev/null
 }
 
+# Rewrite the foreground `podman run` command in CMD for a detached start and
+# run it, echoing the container ID.
+#
+#   $1  keep_rm       whether --rm survives.  The BPF-only path drops it because
+#                     its EXIT trap does an explicit `podman rm -f` that --rm
+#                     would race; the web path keeps it so podman's own cleanup
+#                     removes the container when the agent exits, which still
+#                     works after this script has gone away.
+#   $2  detach_flags  inserted after `run`: -dit for the BPF path, which then
+#                     reattaches with `podman attach`, or -d for the web path,
+#                     which does not attach to PID 1 at all.
+start_detached() {
+    local keep_rm="$1" detach_flags="$2" arg
+    local -a cmd=()
+    local in_podman_args=true
+
+    for arg in "${CMD[@]}"; do
+        # Everything from the image onwards belongs to the agent, not to
+        # podman. Rewriting it too would strip an agent's own -t and insert a
+        # detach flag after an agent subcommand that happens to be called
+        # "run" -- opencode has one -- so the rewrite stops at the image.
+        if [[ "$in_podman_args" == true && "$arg" == "$IMAGE" ]]; then
+            in_podman_args=false
+        elif [[ "$in_podman_args" == true ]]; then
+            case "$arg" in
+                --rm)
+                    if [[ "$keep_rm" == true ]]; then
+                        cmd+=("$arg")
+                    fi
+                    continue
+                    ;;
+                -it|-i|-t)
+                    continue
+                    ;;
+            esac
+        fi
+        cmd+=("$arg")
+        if [[ "$in_podman_args" == true && "$arg" == "run" ]]; then
+            cmd+=("$detach_flags")
+        fi
+    done
+
+    "${cmd[@]}"
+}
+
+# Resolve a container's leaf cgroup, which is what the BPF loader scopes to.
+resolve_cgroup() {
+    local cid="$1" cgroup_path full child
+    local -a children
+
+    cgroup_path=$("${BUILDER}" inspect --format '{{.State.CgroupPath}}' "$cid" 2>/dev/null)
+    if [[ -z "$cgroup_path" ]]; then
+        echo -e "${RED}Error: could not determine container cgroup path${NC}" >&2
+        return 1
+    fi
+
+    if [[ "$cgroup_path" != /sys/fs/cgroup/* ]]; then
+        full="/sys/fs/cgroup${cgroup_path}"
+    else
+        full="$cgroup_path"
+    fi
+
+    # If the path doesn't exist, try the user-scoped path
+    if [[ ! -d "$full" ]]; then
+        full="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service${cgroup_path}"
+    fi
+
+    if [[ ! -d "$full" ]]; then
+        echo -e "${RED}Error: cgroup path not found: ${full}${NC}" >&2
+        echo -e "${YELLOW}Try running with --verbose to debug${NC}" >&2
+        return 1
+    fi
+
+    # Podman rootless creates a child cgroup (e.g. "container") under the
+    # scope where processes actually run.  Walk down to the leaf so the BPF
+    # cgroup ID matches what bpf_get_current_cgroup_id() returns.
+    while true; do
+        children=()
+        for child in "$full"/*/; do
+            if [[ -d "$child" ]]; then
+                children+=("${child%/}")
+            fi
+        done
+        if [[ ${#children[@]} -eq 1 ]]; then
+            full="${children[0]}"
+        else
+            break
+        fi
+    done
+
+    printf '%s\n' "$full"
+}
+
+# Start the BPF loader for a detached web session.
+#
+# The foreground path can keep the loader as a child of this script and kill it
+# from an EXIT trap.  A web session outlives the launching shell, so that trap
+# would tear the blocker down while the agent kept running -- command blocking
+# silently disappearing is the worst possible failure here.
+#
+# Two constraints shape the fix.  sudo's default tty_tickets means a *second*
+# sudo issued later, from a process with no terminal, fails once the cached
+# credentials expire.  And root cannot see a rootless container, so a root-side
+# watchdog cannot use `podman wait`.  So there is exactly one sudo, taken now
+# while credentials are warm, and it owns both the loader and a watchdog that
+# polls the cgroup directory -- root-visible, and removed when the container
+# stops.  Blocking therefore lasts exactly as long as the container.
+start_bpf_blocker() {
+    local cid="$1" cgroup bc
+    local -a loader_args
+
+    if ! cgroup="$(resolve_cgroup "$cid")"; then
+        return 1
+    fi
+
+    loader_args=(--cgroup "$cgroup")
+    for bc in "${BLOCK_CMDS[@]}"; do
+        loader_args+=(--block "$bc")
+    done
+    if [[ "$VERBOSE" == true ]]; then
+        loader_args+=(--verbose)
+        echo -e "${CYAN}Cgroup path: ${cgroup}${NC}"
+    fi
+
+    sudo setsid bash -c '
+        loader="$1"; cgroup="$2"; shift 2
+        "$loader" "$@" &
+        lp=$!
+        while [[ -d "$cgroup" ]]; do sleep 2; done
+        kill "$lp" 2>/dev/null
+    ' _ "$BPF_LOADER" "$cgroup" "${loader_args[@]}" </dev/null >/dev/null 2>&1 &
+
+    echo -e "${GREEN}BPF command blocker active${NC} (${#BLOCK_CMDS[@]} rules, ends with the container)"
+}
+
+# Resolve a session name to its container, refusing anything that is not an
+# opt-in web session.
+#
+# Every path that acts on a caller-supplied name goes through here, including
+# the web dashboard's.  A container without ai-sandbox.web=1 is reported as
+# absent rather than refused: sessions started without --web are meant to be
+# invisible, not merely off limits.
+resolve_web_container() {
+    local session="$1" name marker
+
+    # Checked inline rather than via validate_session_name, which exits: this
+    # runs inside a command substitution, so the exit would only kill the
+    # subshell and the caller would report the failure a second time.
+    if [[ ! "$session" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]]; then
+        return 1
+    fi
+    name="sandbox-${session}"
+
+    if ! "${BUILDER}" container exists "$name" 2>/dev/null; then
+        return 1
+    fi
+    marker="$("${BUILDER}" inspect --format \
+        '{{index .Config.Labels "ai-sandbox.web"}}/{{index .Config.Labels "ai-sandbox.session"}}' \
+        "$name" 2>/dev/null || true)"
+    if [[ "$marker" != "1/${session}" ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "$name"
+}
+
+# Wait for the zellij session inside a freshly started container to answer.
+wait_for_session() {
+    local cid="$1" i
+    for ((i = 0; i < 75; i++)); do
+        if ! "${BUILDER}" container exists "$cid" 2>/dev/null; then
+            return 1
+        fi
+        if "${BUILDER}" exec "$cid" zellij --session "$SESSION" action list-clients >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
+# Attach this terminal to a running web session as an ordinary zellij client.
+do_attach() {
+    local session="$1" ctr
+    if ! ctr="$(resolve_web_container "$session")"; then
+        echo -e "${RED}Error: no web session named '${session}'.${NC}" >&2
+        echo "Only sessions started with --web can be attached; see 'ai-sandbox list'." >&2
+        return 1
+    fi
+
+    # Belt and braces against the startup-tip pane taking the first keystroke on
+    # a machine slow enough that the supervisor's sweep ran too early.
+    "${BUILDER}" exec "$ctr" zellij --session "$session" \
+        action hide-floating-panes --tab-id 0 >/dev/null 2>&1 || true
+
+    # TERM has to be passed explicitly: `podman exec -t` otherwise invents one
+    # that is not the caller's, and the agent TUI renders against it.
+    if ! "${BUILDER}" exec -it \
+            -e "TERM=${TERM:-xterm-256color}" \
+            -e "COLORTERM=${COLORTERM:-}" \
+            "$ctr" zellij attach "$session"; then
+        echo -e "${RED}Could not attach to '${session}'.${NC}" >&2
+        echo "The container is up but its session is not answering. Stop it with:" >&2
+        echo "  ai-sandbox stop ${session}" >&2
+        return 1
+    fi
+}
+
+# Container ids of every running --web session, one per line.
+#
+# `podman ps -q` and an inspect each, rather than one --format template over
+# the listing: `podman ps` template fields are Go struct names, not the JSON
+# keys the same output is documented under, and a single wrong name fails the
+# whole invocation -- which, with the exit status unchecked, reads as "no
+# sessions running" rather than as an error. Nothing here interprets a
+# template, and inspect is what the attach path already depends on.
+web_container_ids() {
+    local raw
+    if ! raw="$("${BUILDER}" ps --filter label=ai-sandbox.web=1 -q 2>&1)"; then
+        echo -e "${RED}Error: could not list containers:${NC} ${raw}" >&2
+        return 1
+    fi
+    [[ -n "$raw" ]] && printf '%s\n' "$raw"
+    return 0
+}
+
+# ai-sandbox list
+do_list() {
+    local -a ids
+    local raw id out="" session agent cols rows network mounts hostdir
+
+    # Captured, not piped from a process substitution: that would report
+    # mapfile's exit status and swallow podman's, which is the whole failure
+    # this function was rewritten to stop repeating.
+    raw="$(web_container_ids)" || return 1
+    mapfile -t ids <<<"$raw"
+
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        # One field per line: a tab separator inside a Go template is a literal
+        # backslash-t unless podman normalises it, and that is exactly the kind
+        # of assumption this function exists to avoid.
+        # Cleared every time: a container removed between `ps` and `inspect`
+        # gives short output, the reads then fail at EOF, and whatever they
+        # leave behind would otherwise be the previous session's parameters
+        # printed against this one's name.
+        session=""; agent=""; cols=""; rows=""; network=""; mounts=""
+        { read -r session; read -r agent; read -r cols; read -r rows
+          read -r network; read -r mounts
+        } < <("${BUILDER}" inspect --format \
+            '{{index .Config.Labels "ai-sandbox.session"}}
+{{index .Config.Labels "ai-sandbox.agent"}}
+{{index .Config.Labels "ai-sandbox.cols"}}
+{{index .Config.Labels "ai-sandbox.rows"}}
+{{index .Config.Labels "ai-sandbox.network"}}
+{{index .Config.Labels "ai-sandbox.mounts"}}' "$id" 2>/dev/null) || true
+        [[ -n "$session" ]] || continue
+        # The host path the session was started on, out of `name=/path;...`,
+        # rather than the container's own /workspace/<name>: that is an
+        # internal detail, and not a directory the reader can act on.
+        hostdir="${mounts%%;*}"; hostdir="${hostdir#*=}"
+        out+="$(printf '  %-26s %-14s %-9s %-7s %s' \
+                "$session" "$agent" "${cols}x${rows}" "$network" "$hostdir")"$'\n'
+    done
+
+    if [[ -z "$out" ]]; then
+        echo "No web sessions running."
+        echo "Start one with: ai-sandbox --web <agent> [directory]"
+        return 0
+    fi
+
+    echo -e "${CYAN}Web sessions${NC}"
+    printf '%s' "$out"
+}
+
+# ai-sandbox stop <session>|--all
+do_stop() {
+    local target="$1" ctr session rc=0
+    local -a sessions
+
+    if [[ "$target" == "--all" ]]; then
+        local id raw
+        raw="$(web_container_ids)" || return 1
+        sessions=()
+        while read -r id; do
+            [[ -n "$id" ]] || continue
+            session="$("${BUILDER}" inspect --format \
+                '{{index .Config.Labels "ai-sandbox.session"}}' "$id" 2>/dev/null)" || continue
+            [[ -n "$session" ]] && sessions+=("$session")
+        done <<<"$raw"
+        if [[ ${#sessions[@]} -eq 0 ]]; then
+            echo "No web sessions running."
+            return 0
+        fi
+        for session in "${sessions[@]}"; do
+            do_stop "$session" || rc=1
+        done
+        return "$rc"
+    fi
+
+    if ! ctr="$(resolve_web_container "$target")"; then
+        echo -e "${RED}Error: no web session named '${target}'.${NC}" >&2
+        return 1
+    fi
+
+    # SIGTERM reaches ai-sandbox-supervise, which kills the zellij session; --rm
+    # then removes the container.
+    #
+    # The status is checked rather than left to `set -e`: the --all loop calls
+    # this as `do_stop "$session" || rc=1`, which disables errexit for the
+    # whole function body, so a failed stop would fall through to the success
+    # message and --all would report having stopped sessions it had not.
+    if ! "${BUILDER}" stop -t 10 "$ctr" >/dev/null; then
+        echo -e "${RED}Error: could not stop '${target}'.${NC}" >&2
+        return 1
+    fi
+    echo -e "${GREEN}Stopped${NC} ${target}"
+}
+
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
     echo "Usage: ai-sandbox <agent> [directory] [--dir path]... [-- extra args]"
     echo "       ai-sandbox --build [target]"
+    echo "       ai-sandbox attach|stop <session>"
+    echo "       ai-sandbox list"
+    echo "       ai-sandbox web [options]"
     echo ""
     echo "Available agents:"
     echo "  claude        - Claude Code (Anthropic, direct API key)"
@@ -134,8 +469,20 @@ usage() {
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
     echo "      --build [target]    Build container images (all|base|claude|codex|cursor|opencode)"
+    echo "      --web               Run the agent inside a detachable session, visible to the"
+    echo "                          web dashboard (env: AI_SANDBOX_WEB=1)"
+    echo "      --web-name <name>   Session name for --web (default: <agent>-<dir>-<random>)"
+    echo "      --web-size <CxR>    Session geometry for --web when there is no terminal"
+    echo "                          to measure (default: 120x32)"
+    echo "      --non-interactive   Never prompt; fail instead (implied when stdin is not a TTY)"
     echo "  -v, --verbose           Show the podman command being run"
     echo "  -h, --help              Show this help"
+    echo ""
+    echo "Session management (--web sessions only):"
+    echo "  attach <session>        Attach this terminal to a running session"
+    echo "  list                    List running web sessions"
+    echo "  stop <session>|--all    Stop a session"
+    echo "  web [options]           Run the web dashboard in the foreground"
     echo ""
     echo "Options for opencode:"
     echo "      --model <name>      Model to use (default: ${OPENCODE_MODEL_DEFAULT}, env: AI_SANDBOX_OPENCODE_MODEL)"
@@ -143,6 +490,43 @@ usage() {
     echo "      --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)"
     exit 0
 }
+
+# --- Subcommand dispatch ------------------------------------------------------
+# Intercepted before the option loop, which treats the first bare word as the
+# agent name.  No agent is called attach, list, stop or web.
+case "${1:-}" in
+    attach)
+        if [[ $# -ne 2 ]]; then
+            echo -e "${RED}Usage: ai-sandbox attach <session>${NC}" >&2
+            exit 1
+        fi
+        do_attach "$2"
+        exit $?
+        ;;
+    list)
+        do_list
+        exit $?
+        ;;
+    stop)
+        if [[ $# -ne 2 ]]; then
+            echo -e "${RED}Usage: ai-sandbox stop <session>|--all${NC}" >&2
+            exit 1
+        fi
+        do_stop "$2"
+        exit $?
+        ;;
+    web)
+        # Mirrors the --build arm below: hand off to the sibling script.
+        WEB_BIN="${AI_SANDBOX_WEB_BIN:-${HOME}/.local/bin/ai-sandbox-web}"
+        if [[ ! -x "$WEB_BIN" ]]; then
+            echo -e "${RED}Error: ai-sandbox-web not found at ${WEB_BIN}${NC}" >&2
+            echo "Run install.sh first, or set AI_SANDBOX_WEB_BIN=/path/to/ai-sandbox-web" >&2
+            exit 1
+        fi
+        shift
+        exec "$WEB_BIN" "$@"
+        ;;
+esac
 
 # --- Argument parsing ---------------------------------------------------------
 AGENT=""
@@ -157,6 +541,10 @@ OPT_BASE_URL=""
 OPT_NO_API_KEY=false
 OPT_CPUS=""
 OPT_MEMORY=""
+OPT_WEB=""
+OPT_WEB_NAME=""
+OPT_WEB_SIZE=""
+NON_INTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -183,6 +571,10 @@ while [[ $# -gt 0 ]]; do
         --model)      OPT_MODEL="$2"; shift 2 ;;
         --base-url)   OPT_BASE_URL="$2"; shift 2 ;;
         --no-api-key) OPT_NO_API_KEY=true; shift ;;
+        --web)        OPT_WEB=1; shift ;;
+        --web-name)   OPT_WEB_NAME="$2"; shift 2 ;;
+        --web-size)   OPT_WEB_SIZE="$2"; shift 2 ;;
+        --non-interactive) NON_INTERACTIVE=true; shift ;;
         -v|--verbose) VERBOSE=true; shift ;;
         --)           shift; EXTRA_ARGS=("$@"); break ;;
         -*)           echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
@@ -202,6 +594,13 @@ done
 if [[ -z "$AGENT" ]]; then
     echo -e "${RED}Error: specify an agent (claude|claude-vertex|codex|cursor)${NC}" >&2
     usage
+fi
+
+# Anything that would block on a prompt has to fail instead when there is no
+# terminal to prompt at -- the web dashboard runs this script from a systemd
+# user service, where stdin is /dev/null and a `read` returns empty immediately.
+if [[ ! -t 0 ]]; then
+    NON_INTERACTIVE=true
 fi
 
 if [[ -n "$BLOCKED_COMMANDS" ]]; then
@@ -335,6 +734,63 @@ MAX_MEM="${OPT_MEMORY:-${AI_SANDBOX_MEMORY:-$MAX_MEM_DEFAULT}}"
 validate_cpus "$MAX_CPUS"
 validate_size "$MAX_MEM"
 
+# --- Resolve web mode ---------------------------------------------------------
+# Same precedence as the resource limits above, and for the same reason.
+WEB_MODE=false
+if [[ "${OPT_WEB:-${AI_SANDBOX_WEB:-0}}" == "1" ]]; then
+    WEB_MODE=true
+fi
+
+SESSION=""
+WEB_COLS=120
+WEB_ROWS=32
+WEB_TERM="xterm-256color"
+if [[ "$WEB_MODE" == true ]]; then
+    SESSION="${OPT_WEB_NAME:-${AI_SANDBOX_SESSION:-}}"
+    if [[ -z "$SESSION" ]]; then
+        # A short random suffix keeps concurrent sessions on the same directory
+        # from colliding without making the name unreadable.  $RANDOM rather
+        # than a /dev/urandom pipeline: `tr ... | head -c 4` leaves tr writing
+        # to a closed pipe, and under `set -o pipefail` that SIGPIPE takes the
+        # whole script down.  This is collision avoidance, not a secret.
+        # The directory name has to be filed down first: it becomes part of a
+        # session name, and validate_session_name below allows only
+        # [A-Za-z0-9_-]. Dots alone are common enough (example.com, foo.git,
+        # bar.d) that leaving them in made --web abort on the default path.
+        slug="${MOUNT_NAMES[0]//[^A-Za-z0-9_-]/-}"
+        slug="${slug#"${slug%%[A-Za-z0-9]*}"}"
+        SESSION="${AGENT}-${slug:-session}-$(printf '%04x' "$((RANDOM % 65536))")"
+        SESSION="${SESSION:0:48}"
+    fi
+    validate_session_name "$SESSION"
+
+    # The session geometry is fixed at creation and recorded on the container so
+    # that a browser client can adopt it rather than impose its own -- see the
+    # resize policy in README "Web UI".  Prefer the launching terminal's real
+    # size; --web-size covers dashboard-started sessions, which have no terminal.
+    if [[ -n "$OPT_WEB_SIZE" ]]; then
+        if [[ ! "$OPT_WEB_SIZE" =~ ^([0-9]{2,4})x([0-9]{2,4})$ ]]; then
+            echo -e "${RED}Error: invalid --web-size '${OPT_WEB_SIZE}'.${NC}" >&2
+            echo "Use <columns>x<rows>, e.g. 120x32" >&2
+            exit 1
+        fi
+        WEB_COLS="${BASH_REMATCH[1]}"
+        WEB_ROWS="${BASH_REMATCH[2]}"
+    elif [[ -t 0 ]]; then
+        read -r WEB_ROWS WEB_COLS < <(stty size 2>/dev/null || echo "32 120")
+    fi
+
+    # The agent's TERM comes from here and nowhere else (see the -e below), so
+    # a useless one must not be propagated: the web dashboard starts sessions
+    # from a systemd user service, where TERM is either absent or "dumb", and
+    # an agent told its terminal is dumb renders in black and white for every
+    # client -- including the browser, which is a perfectly capable one.
+    case "${TERM:-}" in
+        ""|dumb|unknown|none) WEB_TERM="xterm-256color" ;;
+        *)                    WEB_TERM="$TERM" ;;
+    esac
+fi
+
 # --- Resolve opencode settings ------------------------------------------------
 if [[ "$AGENT" == "opencode" ]]; then
     if [[ -n "$OPT_MODEL" ]]; then
@@ -399,6 +855,11 @@ elif [[ -n "$API_KEY_VAR" && -z "${!API_KEY_VAR:-}" ]]; then
             echo "Or use --no-api-key if --base-url points to an endpoint that doesn't need one"
         fi
         echo ""
+        if [[ "$NON_INTERACTIVE" == true ]]; then
+            echo -e "${RED}Error: ${API_KEY_VAR} not set and running non-interactively.${NC}" >&2
+            echo "Set it in ${ENV_FILE}, which is the only place the web dashboard reads keys from." >&2
+            exit 1
+        fi
         read -rp "Do you want to continue anyway? [y/N] " confirm
         [[ "$confirm" =~ ^[yY]$ ]] || exit 1
     fi
@@ -413,6 +874,17 @@ if ! "${BUILDER}" image exists "${IMAGE}" 2>/dev/null; then
     exit 1
 fi
 
+# --web needs the zellij that base/Containerfile installs, so an image built
+# before this feature existed has to be rebuilt rather than fail obscurely
+# later inside the entrypoint.
+if [[ "$WEB_MODE" == true ]]; then
+    if [[ -z "$("${BUILDER}" image inspect --format '{{index .Config.Labels "ai-sandbox.zellij"}}' "${IMAGE}" 2>/dev/null)" ]]; then
+        echo -e "${RED}Image ${IMAGE} has no zellij, which --web requires.${NC}" >&2
+        echo "Rebuild it with: ai-sandbox --build all" >&2
+        exit 1
+    fi
+fi
+
 # --- BPF loader path and validation -------------------------------------------
 BPF_LOADER="${AI_SANDBOX_BPF_LOADER:-${HOME}/.local/bin/ai-sandbox-loader}"
 
@@ -423,14 +895,28 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
         echo -e "${RED}or set AI_SANDBOX_BPF_LOADER=/path/to/loader.${NC}" >&2
         exit 1
     fi
-    if ! sudo -n true 2>/dev/null && ! sudo -v; then
+    # `sudo -v` prompts for a password, so only reach for it when there is a
+    # terminal to prompt at.
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "${RED}Error: passwordless sudo required for BPF command blocking${NC}" >&2
+            echo -e "${RED}when running non-interactively.${NC}" >&2
+            exit 1
+        fi
+    elif ! sudo -n true 2>/dev/null && ! sudo -v; then
         echo -e "${RED}Error: sudo access required for BPF command blocking.${NC}" >&2
         exit 1
     fi
 fi
 
 # --- Build the podman command -------------------------------------------------
-CONTAINER_NAME="sandbox-${AGENT}-$$"
+# In web mode the session name is the single identifier used everywhere: the
+# zellij session, the container name and the dashboard's session id.
+if [[ "$WEB_MODE" == true ]]; then
+    CONTAINER_NAME="sandbox-${SESSION}"
+else
+    CONTAINER_NAME="sandbox-${AGENT}-$$"
+fi
 
 CMD=(
     "${BUILDER}" run --rm -it
@@ -568,6 +1054,42 @@ if [[ -n "$GIT_EMAIL" ]]; then
     CMD+=(-e "GIT_AUTHOR_EMAIL=${GIT_EMAIL}" -e "GIT_COMMITTER_EMAIL=${GIT_EMAIL}")
 fi
 
+# === WEB SESSION ===
+# Labels are what make --web opt-in: a container started without --web carries
+# none of them, so the dashboard's label filter cannot see it at all, and every
+# attach/stop path re-checks ai-sandbox.web before acting on a name.
+if [[ "$WEB_MODE" == true ]]; then
+    MOUNT_SUMMARY=""
+    for i in "${!MOUNT_SRCS[@]}"; do
+        MOUNT_SUMMARY+="${MOUNT_SUMMARY:+;}${MOUNT_NAMES[$i]}=${MOUNT_SRCS[$i]}"
+    done
+    CMD+=(
+        --label "ai-sandbox.web=1"
+        --label "ai-sandbox.session=${SESSION}"
+        --label "ai-sandbox.agent=${AGENT}"
+        --label "ai-sandbox.workdir=${CONTAINER_WORKDIR}"
+        --label "ai-sandbox.mounts=${MOUNT_SUMMARY}"
+        --label "ai-sandbox.cpus=${MAX_CPUS}"
+        --label "ai-sandbox.memory=${MAX_MEM}"
+        --label "ai-sandbox.network=$("${NETWORK_OFF}" && echo none || echo "${NETWORK_MODE}")"
+        --label "ai-sandbox.blocked=${BLOCK_CMDS[*]-}"
+        --label "ai-sandbox.cols=${WEB_COLS}"
+        --label "ai-sandbox.rows=${WEB_ROWS}"
+        --label "ai-sandbox.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        -e "AI_SANDBOX_WEB=1"
+        -e "AI_SANDBOX_SESSION=${SESSION}"
+        # The agent runs in a zellij pane, and zellij hands its panes the
+        # environment of the *server* -- which is this container's PID 1 -- so
+        # this is the only place a --web agent can learn it has a terminal at
+        # all. Verified with zellij 0.45.1: a pane started from a server with
+        # no TERM has no TERM either, and a TUI that cannot detect a terminal
+        # renders in black and white. The TERM passed to `podman exec` on
+        # attach sizes up the *client*, not the agent, so it cannot cover this.
+        -e "TERM=${WEB_TERM}"
+        -e "COLORTERM=${COLORTERM:-truecolor}"
+    )
+fi
+
 # === IMAGE and extra arguments ===
 CMD+=("${IMAGE}")
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
@@ -595,6 +1117,9 @@ else
     echo -e "  Resources: CPU unlimited (no cgroup quota), ${MAX_MEM} RAM, ${MAX_PIDS} PIDs max"
 fi
 echo -e "  Home size: ${TMPFS_HOME_SIZE}"
+if [[ "$WEB_MODE" == true ]]; then
+    echo -e "  Session:   ${SESSION} (${WEB_COLS}x${WEB_ROWS}, detachable)"
+fi
 echo -e "  Network:   $("${NETWORK_OFF}" && echo 'DISABLED' || echo "${NETWORK_MODE} (dns: ${DNS})")"
 if [[ "$AGENT" == "opencode" ]]; then
     echo -e "  Endpoint:  ${AI_SANDBOX_OPENCODE_BASE_URL}"
@@ -605,30 +1130,66 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
 fi
 echo ""
 
-if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
+if [[ "$WEB_MODE" == true ]]; then
+    # === WEB MODE ===
+    # --rm is kept: PID 1 is ai-sandbox-supervise, so the container is removed
+    # when the *agent* exits and never merely because a client detached.  No
+    # `podman attach` is involved, so the container needs no TTY of its own.
+    CONTAINER_ID=$(start_detached true -d)
+    if [[ -z "$CONTAINER_ID" ]]; then
+        echo -e "${RED}Error: failed to start container in background${NC}" >&2
+        exit 1
+    fi
+
+    "${BUILDER}" wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1
+
+    # Failing here would otherwise leave the container running with no command
+    # blocking at all and, under `set -e`, no message beyond the cgroup error:
+    # the agent would be up, unblocked, and unmentioned. The BPF-only path is
+    # protected by its EXIT trap; this one has none, so it cleans up itself.
+    if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
+        if ! start_bpf_blocker "$CONTAINER_ID"; then
+            echo -e "${RED}Error: command blocking could not be started.${NC}" >&2
+            "${BUILDER}" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+            exit 1
+        fi
+    fi
+
+    # A container that dies immediately -- a bad key, an agent that refuses to
+    # start -- would otherwise be auto-removed by --rm before anyone could see
+    # why, so report the failure while it still exists.
+    if ! wait_for_session "$CONTAINER_ID"; then
+        echo -e "${RED}Error: session '${SESSION}' did not come up.${NC}" >&2
+        "${BUILDER}" logs "$CONTAINER_ID" 2>&1 | tail -20 >&2 || true
+        "${BUILDER}" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+        exit 1
+    fi
+
+    echo -e "${GREEN}Session ${SESSION} started.${NC}"
+
+    # With no terminal there is nothing to attach to, so start-and-report is the
+    # only sensible behaviour. This is also how the web dashboard starts
+    # sessions: it runs this script and then attaches over its own PTY.
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        echo "${SESSION}"
+        exit 0
+    fi
+
+    echo -e "  Detach with ${CYAN}Ctrl-o d${NC} — the agent keeps running."
+    echo -e "  Reattach with: ${CYAN}ai-sandbox attach ${SESSION}${NC}"
+    echo ""
+
+    do_attach "$SESSION"
+
+    echo ""
+    echo -e "${CYAN}Detached.${NC} ${SESSION} is still running — see ${CYAN}ai-sandbox list${NC}."
+
+elif [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     # === BPF BLOCKING MODE ===
 
-    # Replace --rm and -it with -dit for background run with TTY+stdin
-    CMD_BG=()
-    for arg in "${CMD[@]}"; do
-        case "$arg" in
-            --rm) continue ;;
-            -it)  continue ;;
-            -i)   continue ;;
-            -t)   continue ;;
-            *)    CMD_BG+=("$arg") ;;
-        esac
-    done
-    CMD_FINAL=()
-    for arg in "${CMD_BG[@]}"; do
-        CMD_FINAL+=("$arg")
-        if [[ "$arg" == "run" ]]; then
-            CMD_FINAL+=("-dit")
-        fi
-    done
-
-    # Start container in background
-    CONTAINER_ID=$("${CMD_FINAL[@]}")
+    # Start container in background, keeping --rm off so the EXIT trap owns
+    # removal, and -dit so `podman attach` below gets a TTY and stdin.
+    CONTAINER_ID=$(start_detached false -dit)
     if [[ $? -ne 0 || -z "$CONTAINER_ID" ]]; then
         echo -e "${RED}Error: failed to start container in background${NC}" >&2
         exit 1
@@ -647,45 +1208,9 @@ if [[ ${#BLOCK_CMDS[@]} -gt 0 ]]; then
     # Wait for container to be running
     "${BUILDER}" wait --condition=running "$CONTAINER_ID" >/dev/null 2>&1 || sleep 1
 
-    # Get cgroup path
-    CGROUP_PATH=$("${BUILDER}" inspect --format '{{.State.CgroupPath}}' "$CONTAINER_ID" 2>/dev/null)
-    if [[ -z "$CGROUP_PATH" ]]; then
-        echo -e "${RED}Error: could not determine container cgroup path${NC}" >&2
+    if ! FULL_CGROUP="$(resolve_cgroup "$CONTAINER_ID")"; then
         exit 1
     fi
-
-    # Build full cgroup path under /sys/fs/cgroup
-    if [[ "$CGROUP_PATH" != /sys/fs/cgroup/* ]]; then
-        FULL_CGROUP="/sys/fs/cgroup${CGROUP_PATH}"
-    else
-        FULL_CGROUP="$CGROUP_PATH"
-    fi
-
-    # If the path doesn't exist, try the user-scoped path
-    if [[ ! -d "$FULL_CGROUP" ]]; then
-        FULL_CGROUP="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service${CGROUP_PATH}"
-    fi
-
-    if [[ ! -d "$FULL_CGROUP" ]]; then
-        echo -e "${RED}Error: cgroup path not found: ${FULL_CGROUP}${NC}" >&2
-        echo -e "${YELLOW}Try running with --verbose to debug${NC}" >&2
-        exit 1
-    fi
-
-    # Podman rootless creates a child cgroup (e.g. "container") under the
-    # scope where processes actually run.  Walk down to the leaf so the BPF
-    # cgroup ID matches what bpf_get_current_cgroup_id() returns.
-    while true; do
-        CHILDREN=()
-        for child in "$FULL_CGROUP"/*/; do
-            [[ -d "$child" ]] && CHILDREN+=("${child%/}")
-        done
-        if [[ ${#CHILDREN[@]} -eq 1 ]]; then
-            FULL_CGROUP="${CHILDREN[0]}"
-        else
-            break
-        fi
-    done
 
     # Build loader arguments
     LOADER_ARGS=(--cgroup "$FULL_CGROUP")

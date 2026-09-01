@@ -1,0 +1,7 @@
+# Browser assets vendored by install.sh, pinned by version and content hash.
+# Fetched once at install time and served from disk: the dashboard's
+# Content-Security-Policy is default-src 'self', so there is no CDN at runtime.
+#
+# <sha256>  <destination under web/static/>  <url>
+1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495  vendor/xterm.js   https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js
+ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6  vendor/xterm.css  https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css

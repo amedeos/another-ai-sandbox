@@ -82,5 +82,60 @@ RUN dnf install -y \
 # Non-root user for agent execution
 RUN useradd -m -s /bin/bash agent
 
+# Terminal multiplexer backing `ai-sandbox --web`: the agent runs inside a
+# zellij session so that closing the browser or the terminal detaches instead
+# of killing it.  Kept in its own layer so a version bump does not rebuild the
+# package layer above (whose trailing `strip` would also invalidate the hash).
+#
+# The "no-web" build is deliberate: zellij ships its own web server, which this
+# project does not use (see README "Web UI"), and omitting it saves ~4 MB.
+# Upstream publishes a .sha256sum sidecar per asset covering the EXTRACTED
+# binary rather than the tarball, so verification happens after extraction.
+ARG ZELLIJ_VERSION=0.45.1
+ARG ZELLIJ_SHA256_X86_64=0ec6ef07b63c6355c02ce18343d40ef5ef5af19e25313ea9009c8fceda29e94f
+ARG ZELLIJ_SHA256_AARCH64=2f3965f5b4d7fbb25dfc543e91f9680c9ee7b4eb07d8a3e6392fa276fc65c509
+RUN set -euo pipefail \
+    && case "$(uname -m)" in \
+        x86_64)  zj_arch="x86_64-unknown-linux-musl";  zj_sha="${ZELLIJ_SHA256_X86_64}" ;; \
+        aarch64) zj_arch="aarch64-unknown-linux-musl"; zj_sha="${ZELLIJ_SHA256_AARCH64}" ;; \
+        *) echo "unsupported architecture for zellij: $(uname -m)" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL --retry 3 --retry-delay 2 -o /tmp/zellij.tar.gz \
+        "https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-no-web-${zj_arch}.tar.gz" \
+    && mkdir -p /tmp/zellij-extract \
+    && tar -xzf /tmp/zellij.tar.gz -C /tmp/zellij-extract \
+    && zj_bin="$(find /tmp/zellij-extract -type f -name zellij | head -1)" \
+    && [ -n "$zj_bin" ] \
+    && echo "${zj_sha}  ${zj_bin}" | sha256sum -c - \
+    && install -m 755 "$zj_bin" /usr/local/bin/zellij \
+    && rm -rf /tmp/zellij.tar.gz /tmp/zellij-extract
+
+LABEL ai-sandbox.zellij="0.45.1"
+
+# `podman exec` inherits the container's configured environment (Config.Env),
+# NOT variables exported by the entrypoint at runtime.  Anything that PID 1 and
+# `podman exec ... zellij attach` must agree on therefore belongs here: pointed
+# at the wrong socket directory, an exec would silently create a *second*
+# session instead of attaching to the running one.
+#
+# The socket path has a 107-byte limit, so keep it short and on tmpfs.
+# LANG matters because the package layer removes /usr/share/locale; glibc's
+# built-in C.UTF-8 is the only UTF-8 locale left, and zellij's UI needs one.
+# TERM belongs here for the same reason: zellij gives its panes the zellij
+# server's environment, so without it the agent inside a --web session cannot
+# detect a terminal and drops to black and white.  `ai-sandbox --web` passes
+# the launching terminal's own TERM, which overrides this; this is the default
+# for a container started any other way.
+ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
+    ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
+    TERM=xterm-256color \
+    COLORTERM=truecolor \
+    LANG=C.UTF-8
+
+COPY zellij.kdl /etc/zellij/config.kdl
+COPY ai-sandbox-supervise /usr/local/bin/ai-sandbox-supervise
+RUN chmod 644 /etc/zellij/config.kdl \
+    && chmod 755 /usr/local/bin/ai-sandbox-supervise
+
 # Standard working directory
 WORKDIR /workspace

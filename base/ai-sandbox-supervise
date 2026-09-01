@@ -1,0 +1,74 @@
+#!/bin/bash
+# =============================================================================
+# ai-sandbox-supervise — entrypoint shim shared by every agent image
+#
+# Without AI_SANDBOX_WEB=1 this is a transparent `exec "$@"`, so normal
+# sessions behave exactly as they did before the web UI existed.
+#
+# With AI_SANDBOX_WEB=1 the agent is started inside a detached zellij session
+# instead, so that closing the terminal or the browser detaches rather than
+# killing it.  This process then becomes the thing that keeps the container
+# alive, because the zellij server daemonises and reparents away from us.
+# =============================================================================
+set -euo pipefail
+
+if [[ "${AI_SANDBOX_WEB:-0}" != "1" ]]; then
+    exec "$@"
+fi
+
+SESSION="${AI_SANDBOX_SESSION:?AI_SANDBOX_SESSION must be set for --web sessions}"
+SOCKET_DIR="${ZELLIJ_SOCKET_DIR:-/tmp/zellij-sock}"
+
+# /home/agent is a fresh tmpfs on every start, so recreate what zellij needs.
+# No plugin-cache seeding is required: measured on a completely cold cache, the
+# session socket is up in ~50 ms and the cache reaches only ~12 KB.
+mkdir -p "${SOCKET_DIR}" "${HOME}/.cache" "${HOME}/.config"
+
+# Verified against zellij 0.45.1: returns 0 immediately and leaves a detached
+# session with zero clients attached, running "$@" in its only pane.
+zellij attach --create-background --close-on-exit "$SESSION" -- "$@"
+
+# podman stop signals PID 1.  Tear the session down deliberately instead of
+# sitting out the full stop timeout waiting to be SIGKILLed.
+trap 'zellij kill-session "$SESSION" >/dev/null 2>&1 || true; exit 0' TERM INT
+
+# Wait on the session SOCKET, never on `zellij list-sessions`.
+#
+# Every zellij client connection resets the session's idle teardown, so a
+# `list-sessions` poll keeps alive the very session it is waiting to see end —
+# verified: a 2 s poll holds an exited session open indefinitely, while the
+# identical session with no poll tears itself down within ~4 s.  A filesystem
+# check connects no client, and the socket is removed when the session ends,
+# which also covers the case of the zellij server dying unexpectedly.
+SOCKET=""
+for _ in $(seq 1 50); do
+    SOCKET="$(find "${SOCKET_DIR}" -mindepth 2 -maxdepth 2 -type s -name "${SESSION}" 2>/dev/null | head -1 || true)"
+    if [[ -n "$SOCKET" ]]; then
+        break
+    fi
+    sleep 0.2
+done
+
+if [[ -z "$SOCKET" ]]; then
+    echo "ai-sandbox-supervise: zellij session '${SESSION}' failed to start" >&2
+    exit 1
+fi
+
+# zellij opens a floating "About Zellij" startup-tip pane in every new session
+# and it takes focus the moment a client attaches, so without this the first
+# thing the user types goes to the tip plugin rather than to the agent
+# (verified).  There is no configuration option for it in 0.45.
+#
+# Measured: the tip pane is created asynchronously ~0.5 s AFTER the session
+# socket appears, so hiding once and stopping at the first "already hidden"
+# runs too early and misses it.  Sweep across that window instead; the agent is
+# already running by now, so the few seconds cost nothing.  Attach paths hide
+# it again just before connecting, which covers slower machines.
+for _ in $(seq 1 20); do
+    zellij --session "$SESSION" action hide-floating-panes --tab-id 0 >/dev/null 2>&1 || true
+    sleep 0.25
+done
+
+while [[ -S "$SOCKET" ]]; do
+    sleep 2
+done
