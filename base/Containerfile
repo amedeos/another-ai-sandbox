@@ -61,6 +61,7 @@ RUN dnf install -y \
         poppler-utils \
         mupdf \
         yamllint \
+        uv \
         pandoc \
     && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && rm -f /usr/bin/mupdf /usr/bin/mupdf-gl /usr/bin/mupdf-x11 \
@@ -131,12 +132,26 @@ LABEL ai-sandbox.zellij="0.45.1"
 # Code's Ctrl+G) has nothing to open without them -- there is no login shell in
 # the pane to set them, and /home/agent is a tmpfs, so a dotfile would not
 # survive either.  vim-enhanced above is what they point at.
+#
+# The UV_* pair exists because /home/agent is a tmpfs while the project is a
+# bind mount.  uv's cache therefore sits on a different filesystem from the
+# .venv it populates, so its default link mode cannot hardlink and falls back
+# to copying with a warning on every install; UV_LINK_MODE=copy asks for that
+# fallback directly.  UV_PYTHON_PREFERENCE is the same tmpfs story seen from
+# the interpreter side: uv's default prefers a *managed* interpreter over a
+# system one (it still prefers a system one over downloading, so the default
+# does not fetch anything while python3.12/3.13/3.14 satisfy the request), and
+# a managed interpreter installed mid-session lives in the tmpfs and is gone
+# at exit.  `system` keeps the image's own interpreters as the first choice
+# and leaves a download as the fallback for a version that is not here.
 ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
     ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
     TERM=xterm-256color \
     COLORTERM=truecolor \
     EDITOR=vim \
     VISUAL=vim \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_PREFERENCE=system \
     LANG=C.UTF-8
 
 COPY zellij.kdl /etc/zellij/config.kdl

@@ -96,6 +96,20 @@ jobs:
             localhost/agent-base:latest EDITOR VISUAL | tr '\n' ' ')
           [[ "$out" == "vim vim " ]]
 
+      # uv's two image defaults are as much a part of the contract as EDITOR:
+      # on a tmpfs cache next to a bind-mounted project, losing UV_LINK_MODE
+      # brings back a hardlink warning on every install, and losing
+      # UV_PYTHON_PREFERENCE lets a tmpfs-resident interpreter outrank the
+      # image's own.
+      - name: Smoke test – uv in the base image
+        run: |
+          podman run --rm --entrypoint uv \
+            localhost/agent-base:latest --version
+          out=$(podman run --rm --entrypoint printenv \
+            localhost/agent-base:latest \
+            UV_LINK_MODE UV_PYTHON_PREFERENCE | tr '\n' ' ')
+          [[ "$out" == "copy system " ]]
+
       # With AI_SANDBOX_WEB unset the supervisor must be a transparent exec,
       # which is what keeps non-web sessions unchanged.
       - name: Smoke test – supervisor passthrough
