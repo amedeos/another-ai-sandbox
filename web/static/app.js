@@ -12,6 +12,9 @@
 
 const BASE_FONT = 14;
 const INPUT_FLUSH_MS = 12;
+// Mirrors MAX_PASTE_BYTES in the server: refuse an oversized image here rather
+// than push megabytes at a request that is going to be rejected anyway.
+const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
 const MIN_ZOOM = 0.5;
@@ -289,6 +292,182 @@ function flushInput() {
   }).catch(() => {});
 }
 
+// The image a paste carries, or null for an ordinary text paste.
+//
+// Browsers disagree about where it lives: Chromium exposes a pasted *bitmap*
+// only through items[] (kind 'file', getAsFile()) and leaves files empty unless
+// an actual file was copied from a file manager, while Firefox fills both (and
+// lists the image twice). Read items first, fall back to files.
+//
+// Synchronous by necessity: a DataTransferItemList is emptied the moment the
+// paste handler returns, so the File has to be taken out before any await.
+function clipboardImage(data) {
+  if (!data) return null;
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind === 'file' && (item.type || '').startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) return file;
+    }
+  }
+  return Array.from(data.files || [])
+    .find((f) => (f.type || '').startsWith('image/')) || null;
+}
+
+// One paste gesture in flight at a time. Both routes have to consult it before
+// acting, and whichever gets there first consumes it: the paste event usually
+// wins, but a clipboard read that was already waiting on Chromium's permission
+// prompt can land afterwards, and then the loser must do nothing rather than
+// deliver the same image twice.
+//
+// The gesture also remembers the attachment it was armed for. A clipboard read
+// can be pending for as long as the prompt is up, which is long enough to go
+// Back and attach a different session -- and an image that arrives then belongs
+// to nobody, least of all to the other sandbox's agent.
+let pasteGesture = null;
+
+// Neither the DOM nor the clipboard API gives a paste an identity, and the
+// gesture record alone cannot tell "a new paste" from "the paste I just served,
+// arriving again": the listener would see no gesture in flight either way and
+// deliver a second copy. Measured with a single Ctrl+V and a screenshot on the
+// clipboard, that produced two uploads and two paths at the prompt in both
+// engines -- Gecko dispatches a second paste event for the same keystroke, and
+// in Chromium the clipboard read resolves before the event arrives.
+//
+// So a delivery closes the door behind it for a moment. Pasting twice inside
+// this window is not something a person does by hand; a duplicate landing
+// milliseconds after its twin is the whole failure mode.
+const PASTE_SETTLE_MS = 750;
+let pasteServedAt = 0;
+
+// The last upload, so the identical bytes are never sent twice in a row. The
+// duplicate this caught came from a real defect, now fixed, but the backstop
+// stays: every route ends here, a paste that reaches it twice hands the agent
+// two paths for one image, and the cost of being wrong is only that an
+// intentional re-paste of the same screenshot inside PASTE_DUPLICATE_MS is
+// refused -- which the status line says out loud rather than swallowing.
+const PASTE_DUPLICATE_MS = 1500;
+let lastUpload = { size: -1, at: 0 };
+
+function pasteSettled() {
+  return Date.now() - pasteServedAt >= PASTE_SETTLE_MS;
+}
+
+function servePaste() {
+  pasteServedAt = Date.now();
+}
+
+function armPaste(label, fallback) {
+  pasteTrace = [label];
+  pasteGesture = { label, attachId: state.attachId, fallback: fallback === true };
+  return pasteGesture;
+}
+
+function claimPaste(gesture) {
+  if (!gesture || gesture !== pasteGesture) return false;   // already consumed
+  pasteGesture = null;
+  return Boolean(state.attachId) && gesture.attachId === state.attachId;
+}
+
+// A paste that produces nothing is otherwise silent, and the two halves of the
+// mechanism (the DOM event, the direct clipboard read) fail for different
+// reasons in different browsers -- so each step records what it saw and the
+// status line says it out loud when nothing came of it.
+let pasteTrace = [];
+
+function traceStatus() {
+  const line = pasteTrace.join(' · ') || 'nothing happened';
+  $('term-status').textContent = `Paste: ${line}`;
+  // Also in the console: the status line sits under a terminal that can be
+  // taller than the window, so it is easy to miss.
+  if (window.console) window.console.log(`paste: ${line}`);
+}
+
+function describe(data) {
+  if (!data) return 'event: no clipboardData';
+  const types = Array.from(data.types || []).join(',') || '-';
+  const items = Array.from(data.items || [])
+    .map((i) => `${i.kind}:${i.type || '?'}`).join(',') || '-';
+  return `event: types=[${types}] files=${(data.files || []).length} items=[${items}]`;
+}
+
+function sendImage(blob) {
+  if (blob.size > MAX_PASTE_BYTES) {
+    $('term-status').textContent = 'That image is larger than the 10 MB limit.';
+    return;
+  }
+  const now = Date.now();
+  if (blob.size === lastUpload.size && now - lastUpload.at < PASTE_DUPLICATE_MS) {
+    $('term-status').textContent = 'Same image again — ignored the duplicate.';
+    return;
+  }
+  lastUpload = { size: blob.size, at: now };
+  uploadImage(blob);
+}
+
+// Route two for Ctrl+V: ask the clipboard itself, rather than waiting for a
+// DataTransfer to be handed to the page. Chromium reaches this because its
+// paste event arrives without the image (or does not arrive); Firefox never
+// does, because there the event carries it -- which also means no Firefox
+// permission prompt.
+//
+// Text is handled here too, not only images: with Ctrl+V given back to the
+// browser, a browser that fires no paste event would otherwise paste nothing at
+// all. term.paste() is xterm's own entry point, so it stays bracketed.
+async function pasteFromClipboard(gesture) {
+  if (gesture !== pasteGesture || !state.term || !state.attachId) return;
+  if (!pasteSettled()) return;          // something already served this burst
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    claimPaste(gesture);
+    pasteTrace.push('read: unavailable (insecure context?)');
+    traceStatus();
+    return;
+  }
+
+  let items;
+  try {
+    items = await navigator.clipboard.read();
+  } catch (err) {
+    // Chromium asks permission the first time and refuses outright in some
+    // windows; say so, because nothing else in the UI would.
+    claimPaste(gesture);
+    pasteTrace.push(`read: ${err.name}: ${err.message}`);
+    traceStatus();
+    return;
+  }
+
+  for (const item of items) {
+    const image = item.types.find((t) => t.startsWith('image/'));
+    if (image) {
+      // Claimed only now, after the await: the event may have delivered this
+      // same paste while the read was waiting on the permission prompt.
+      if (!claimPaste(gesture)) return;
+      servePaste();
+      try {
+        sendImage(await item.getType(image));
+      } catch (err) {
+        pasteTrace.push(`read: ${image} failed: ${err.message}`);
+        traceStatus();
+      }
+      return;
+    }
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/plain')) continue;
+    if (!claimPaste(gesture)) return;
+    servePaste();
+    try {
+      state.term.paste(await (await item.getType('text/plain')).text());
+    } catch (err) {
+      pasteTrace.push(`read: text failed: ${err.message}`);
+      traceStatus();
+    }
+    return;
+  }
+  if (!claimPaste(gesture)) return;
+  pasteTrace.push(`read: no image, types=[${items.map((i) => i.types.join(',')).join(' ')}]`);
+  traceStatus();
+}
+
 async function uploadImage(file) {
   $('term-status').textContent = `Uploading ${file.name || 'image'}…`;
   try {
@@ -354,17 +533,73 @@ async function attachTerminal(session) {
   term.onData((data) => { state.pending.push(data); });
   state.flusher = window.setInterval(flushInput, INPUT_FLUSH_MS);
 
-  // Image paste: intercept only when the clipboard actually carries files, so
-  // ordinary text paste still goes through xterm.js (and stays bracketed).
-  if (term.textarea) {
-    term.textarea.addEventListener('paste', (e) => {
-      const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
-      const images = files.filter((f) => f.type.startsWith('image/'));
-      if (!images.length) return;
-      e.preventDefault();
-      uploadImage(images[0]);
-    });
-  }
+  // Hand Ctrl+V back to the browser, which is what makes an image paste
+  // possible at all: xterm.js encodes it as ^V and cancels the DOM event, so no
+  // `paste` event is ever produced, and the gestures that do produce one are not
+  // equivalent -- Chromium's Ctrl+Shift+V is *paste as plain text*, and the
+  // DataTransfer it builds has the image stripped out of it. Returning false
+  // makes xterm skip the key WITHOUT cancelling it, so the browser performs a
+  // real paste: xterm's own paste listener still handles text (bracketed, as
+  // before) and the capture-phase listener below takes the image.
+  //
+  // ^V therefore cannot be typed in the browser terminal, which is the accepted
+  // trade for the paste every user expects. Cmd+V on macOS was never encoded by
+  // xterm, so it needed no such handover.
+  //
+  // Every event type, not keydown alone: xterm consults this handler from its
+  // keypress path too and cancels the event there before it ever looks at
+  // ctrlKey, and Gecko still dispatches a keypress for Ctrl+letter -- cancel
+  // that one and Firefox stops pasting as well. keyup is inert either way.
+  //
+  // keyCode, deprecated as it is, and not `key`: this has to match exactly the
+  // event xterm would have encoded as ^V, and xterm switches on keyCode. On a
+  // Cyrillic or Dvorak layout `key` is some other letter while keyCode is still
+  // 86, so the two decisions would otherwise drift apart and Ctrl+V would send
+  // ^V to the agent with no paste to show for it.
+  //
+  // Handing the key over is necessary but not sufficient: measured in Chromium
+  // 141 on a real session, a Ctrl+V with a screenshot on the clipboard produces
+  // no usable image for the page at all, while the identical build of this page
+  // works in Firefox. So the keystroke also arms a second route that does not
+  // depend on the paste event -- see pasteFromClipboard below -- and whichever
+  // arrives first wins.
+  term.attachCustomKeyEventHandler((e) => {
+    const isPaste = e.keyCode === 86 && !e.altKey
+      && ((e.ctrlKey && !e.metaKey) || (e.metaKey && !e.ctrlKey));
+    if (!isPaste) return true;
+
+    // keydown only: keypress and keyup would arm the same gesture twice. And
+    // only once the last delivery has settled: key autorepeat, or a second
+    // keydown for one press, would otherwise arm a second gesture -- and a
+    // second gesture is a second delivery, which is how one Ctrl+V uploaded
+    // the same screenshot twice.
+    if (e.type === 'keydown') {
+      let label = 'Ctrl+V';
+      if (e.metaKey) label = 'Cmd+V';
+      else if (e.shiftKey) label = 'Ctrl+Shift+V';
+      if (pasteSettled()) {
+        // Armed here, synchronously, and NOT inside the callback: the paste
+        // event lands within a couple of milliseconds, and a gesture that only
+        // comes into being when the timer fires leaves that event to arm one of
+        // its own -- two gestures for one keystroke, each delivering once.
+        const gesture = armPaste(label, true);
+        window.setTimeout(() => pasteFromClipboard(gesture), 200);
+      }
+    }
+
+    // Only plain Ctrl+V has to be taken away from xterm, which would send ^V
+    // instead. Ctrl+Shift+V and Cmd+V are not encoded by xterm at all, so the
+    // browser already pastes on them and they need nothing beyond the gesture
+    // armed above -- which they do need, because Ctrl+Shift+V is precisely the
+    // gesture Chromium answers with the image stripped out (it means "paste as
+    // plain text" there), and Cmd+V is the macOS one.
+    //
+    // Never on keyup: a false return there also skips the focus() and cursor
+    // update xterm performs on every key release (verified in the pinned 5.5.0
+    // bundle: `_keyUp` short-circuits on a false custom handler), which is how
+    // the hidden textarea gets focus back after a paste moved it.
+    return e.shiftKey || e.metaKey || e.type === 'keyup';
+  });
 
   const source = new EventSource(`/api/attach/${info.attach_id}/stream`);
   state.source = source;
@@ -400,6 +635,81 @@ function closeTerminal() {
   $('crumb').textContent = '';
   refresh();
 }
+
+// Image paste, in the capture phase and on the container rather than on the
+// terminal itself, for two reasons:
+//
+//   - xterm registers its own paste listener on both its textarea and its root
+//     element during term.open(), i.e. before any listener added afterwards,
+//     and it forwards the clipboard's text/plain sibling -- for an image copied
+//     from a web page, a URL or the alt text -- to the agent as a bracketed
+//     paste. An ancestor capture listener runs first in every browser, so
+//     stopPropagation() here keeps xterm out of the image case entirely.
+//   - #term outlives every attachment, so this is registered exactly once.
+//     Registered per attach it would stack a listener per Back/Attach cycle and
+//     upload the same image once per cycle: stopPropagation does not stop
+//     sibling listeners on the same node.
+//
+// An ordinary text paste falls through untouched.
+$('term').addEventListener('paste', (e) => {
+  if (!state.term || !state.attachId) return;
+
+  // This terminal owns every paste that lands on it. Cancelling unconditionally
+  // and routing text through xterm's own paste() below leaves exactly one path
+  // per gesture, which is what makes a duplicate recognisable at all -- and it
+  // is the only way to stop an image paste from typing its text/plain sibling
+  // (a URL, or the alt text) at the agent's prompt, extracted image or not.
+  e.preventDefault();
+  e.stopPropagation();
+
+  const data = e.clipboardData;
+  // No gesture in flight means either a paste route of the browser's own (the
+  // context menu, middle click, Shift+Insert) or the twin of one just served.
+  let gesture = pasteGesture;
+  if (!gesture) {
+    if (!pasteSettled()) return;
+    gesture = armPaste('paste', false);
+  }
+
+  const image = clipboardImage(data);
+  if (image) {
+    if (claimPaste(gesture)) {
+      servePaste();
+      sendImage(image);
+    }
+    return;
+  }
+
+  const claimsImage = Boolean(data)
+    && Array.from(data.types || []).some((t) => t.startsWith('image/'));
+  if (claimsImage) {
+    // Chromium: the clipboard has an image, the event did not carry it. Leave
+    // the gesture for the clipboard read -- and start one, if this gesture came
+    // from a browser route that armed none.
+    if (!gesture.fallback) {
+      gesture.fallback = true;
+      window.setTimeout(() => pasteFromClipboard(gesture), 0);
+    }
+    return;
+  }
+
+  const text = data ? data.getData('text/plain') : '';
+  if (text) {
+    // paste() is xterm's own entry point, the same one its listener would have
+    // used, so this stays bracketed exactly as before.
+    if (claimPaste(gesture)) {
+      servePaste();
+      state.term.paste(text);
+    }
+    return;
+  }
+
+  pasteTrace.push(describe(data));
+  if (!gesture.fallback) {
+    claimPaste(gesture);
+    traceStatus();                      // nothing else is coming for this one
+  }
+}, true);
 
 $('back').addEventListener('click', closeTerminal);
 $('zoom-in').addEventListener('click', () => setZoom(state.fontScale * 1.15));

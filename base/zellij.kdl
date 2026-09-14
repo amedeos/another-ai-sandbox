@@ -29,3 +29,30 @@ show_release_notes false
 
 // copy_command is deliberately unset: a sandboxed agent gets no bridge to the
 // host clipboard.
+
+// The agent owns the keyboard.  zellij's stock bindings take Ctrl+G, Ctrl+Q,
+// Ctrl+P, Ctrl+N, Ctrl+S, Ctrl+O, Ctrl+T, Ctrl+H, Ctrl+B and most Alt keys
+// before the pane ever sees them, and the agents bind several of those
+// themselves: Claude Code alone uses Ctrl+G (edit the prompt in $EDITOR),
+// Ctrl+O, Ctrl+T, Ctrl+B and Ctrl+R.  Locked mode is the only mode that
+// forwards everything to the pane, so a session starts locked and keeps exactly
+// one key for zellij itself.
+//
+// clear-defaults on the locked block is load-bearing: stock locked mode reserves
+// Ctrl+G as its way back to normal mode -- the very key this is about.  Alt+G
+// takes over that job, which is the one door to zellij's own keybindings (and
+// therefore to `Ctrl+o d` detach) for a terminal client.
+default_mode "locked"
+
+keybinds {
+    // Quit, unbound in every mode rather than merely unreachable while locked.
+    // It is Ctrl+Q, one fumbled key from the Ctrl+O of the detach chord, and a
+    // session torn down that way takes the container with it: --rm then removes
+    // the tmpfs /home/agent and /tmp, agent state included.  Nothing here needs
+    // it -- a session ends when the agent exits, or via `ai-sandbox stop`.
+    unbind "Ctrl q"
+
+    locked clear-defaults=true {
+        bind "Alt g" { SwitchToMode "Normal"; }
+    }
+}

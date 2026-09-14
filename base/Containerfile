@@ -46,6 +46,7 @@ RUN dnf install -y \
         binutils \
         file \
         less \
+        vim-enhanced \
         which \
         procps-ng \
         fd-find \
@@ -126,10 +127,16 @@ LABEL ai-sandbox.zellij="0.45.1"
 # detect a terminal and drops to black and white.  `ai-sandbox --web` passes
 # the launching terminal's own TERM, which overrides this; this is the default
 # for a container started any other way.
+# EDITOR/VISUAL likewise: an agent that opens the prompt in an editor (Claude
+# Code's Ctrl+G) has nothing to open without them -- there is no login shell in
+# the pane to set them, and /home/agent is a tmpfs, so a dotfile would not
+# survive either.  vim-enhanced above is what they point at.
 ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
     ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
     TERM=xterm-256color \
     COLORTERM=truecolor \
+    EDITOR=vim \
+    VISUAL=vim \
     LANG=C.UTF-8
 
 COPY zellij.kdl /etc/zellij/config.kdl

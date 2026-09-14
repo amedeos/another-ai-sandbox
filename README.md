@@ -315,7 +315,7 @@ The [web UI](#web-ui) does not change this. It publishes no container port and a
 
 ## Base Image
 
-Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
 
 It also carries **zellij** (~44 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
 
@@ -392,7 +392,7 @@ It is entirely opt-in. A sandbox is reachable from the browser **only** if it wa
 
 ```bash
 # Start a detachable session and attach this terminal to it.
-# Ctrl-o d detaches — the agent keeps running.
+# Alt-g then Ctrl-o d detaches — the agent keeps running.
 ai-sandbox --web claude ~/my-project
 
 # From another terminal, or after closing the first one:
@@ -440,6 +440,14 @@ The session name is the single identifier throughout: it is the zellij session, 
 
 The agent runs inside a detached [zellij](https://zellij.dev) session, which is what makes detaching safe: the terminal and the browser are both ordinary zellij clients, and closing either one leaves the agent untouched. Container PID 1 is a small supervisor that outlives every client and exits only when the agent does, at which point `--rm` removes the container.
 
+### Keys, and how to detach
+
+The session starts in zellij's **locked** mode, so every keystroke goes to the agent. This is not cosmetic: zellij's stock bindings claim `Ctrl+G`, `Ctrl+Q`, `Ctrl+P`, `Ctrl+N`, `Ctrl+S`, `Ctrl+O`, `Ctrl+T`, `Ctrl+H`, `Ctrl+B` and most `Alt` keys before the pane sees them, and the agents bind several of those themselves — Claude Code alone uses `Ctrl+G` (edit the prompt in `$EDITOR`), `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+R`.
+
+`Alt+g` is the single exception and the one door into zellij's own keybindings: press it for normal mode, and `Ctrl+o d` then detaches a terminal client (`Ctrl+g` locks again). A browser client just goes Back, or closes the tab. Zellij's `Quit` is unbound outright, in normal mode too and not merely unreachable while locked: it sits on `Ctrl+Q`, one fumbled key from the `Ctrl+O` of that chord, and a session quit that way takes the container with it — `--rm` then removes the tmpfs `/home/agent` and `/tmp` along with the agent's state.
+
+The editor behind `Ctrl+G` is the image's Vim: `EDITOR` and `VISUAL` are set in the image, because zellij hands its panes container PID 1's environment and `/home/agent` is a tmpfs where no dotfile would survive.
+
 ### Security
 
 The web layer adds no privileges to the sandboxes and no new paths into them.
@@ -457,7 +465,13 @@ The web layer adds no privileges to the sandboxes and no new paths into them.
 
 ### Screenshot and image paste
 
-Pasting an image into the browser terminal uploads it into the session's `/tmp` and types the resulting path into the prompt, which is what the CLI agents accept. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Ordinary text paste is untouched and stays bracketed.
+Press **Ctrl+V** with an image on the clipboard (`Ctrl+Shift+V` works too): it is uploaded into the session's `/tmp` and the resulting path is typed into the prompt, which is what the CLI agents accept. On Chromium the first paste asks permission to read the clipboard — see below for why it has to. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Text pastes go through xterm's own `paste()` and stay bracketed.
+
+`Ctrl+V` is handled by the browser rather than encoded as `^V`: xterm.js otherwise cancels the keystroke, and the paste gestures that remain are ones Chromium strips the image out of (its `Ctrl+Shift+V` is *paste as plain text*). The cost is that a literal `^V` cannot be typed in the browser terminal.
+
+That handover is enough for Firefox, whose paste event carries the image — read from `items` as well as `files`, because Chromium puts a pasted bitmap only in the former. Chromium hands the page no usable image on either gesture (verified on 141 against a KDE Spectacle screenshot), so both `Ctrl+V` and `Ctrl+Shift+V` arm a second route 200 ms later: `navigator.clipboard.read()`, which asks the clipboard directly and needs no paste event. The dashboard is loopback-only, hence a secure context, which is what makes that API available at all; Chromium asks permission the first time.
+
+Whichever route arrives first wins, and a browser whose event carried the image never reaches the second one — so Firefox is never prompted. Text goes down the second route too when it has to, through xterm's own `paste()`, so it stays bracketed. A delivery then closes the door behind it for 750 ms, and an upload of the identical byte count within 1.5 s is refused outright (the status line says so), because the agent must never be handed two paths for one image. Both exist because a paste has no identity of its own: neither the DOM nor the clipboard API gives a paste an identity, Gecko dispatches a second paste event for the same keystroke, and in Chromium the clipboard read can resolve before the event does — without that window a single Ctrl+V uploaded the screenshot twice in both engines. When neither route produces anything the status line under the terminal says which step came up empty, because a silent paste is otherwise indistinguishable from a keystroke that never arrived.
 
 ### Terminal size with two clients
 

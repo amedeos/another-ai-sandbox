@@ -1,7 +1,12 @@
 #!/bin/bash
 # =============================================================================
 # End-to-end tests for the web UI: session opt-in isolation, dashboard auth,
-# dual attach, image paste and cleanup.
+# dual attach, keyboard delivery, image paste and cleanup.
+#
+# The browser half of image paste is NOT covered: firing a DOM `paste` event
+# needs a browser, so what is tested here is the endpoint it posts to.  The
+# clipboard extraction in web/static/app.js has to be checked by hand, in both
+# Chromium and Firefox.
 #
 # Unlike the BPF test this needs NO root — everything runs rootless.
 # Requires built container images and python3.
@@ -143,8 +148,14 @@ skip() {
 # $2 is the podman network mode.  It matters: the reachability test below has
 # to run with the *default* network, since a container with --network=none
 # cannot reach anything and would pass that test no matter what.
+# Anything after $2 replaces the pane command, which is how the keyboard test
+# gets a pane that records what the agent would have received.
 start_web_session() {
     local name="$1" network="${2:-none}"
+    local -a pane=("${@:3}")
+    if [[ ${#pane[@]} -eq 0 ]]; then
+        pane=(/bin/bash -c 'while :; do sleep 5; done')
+    fi
 
     podman run -d --rm --name "sandbox-${name}" \
         --userns=keep-id:uid=1000,gid=1000 \
@@ -163,7 +174,7 @@ start_web_session() {
         --label "ai-sandbox.network=${network}" \
         -e "AI_SANDBOX_WEB=1" -e "AI_SANDBOX_SESSION=${name}" \
         --entrypoint /usr/local/bin/ai-sandbox-supervise \
-        "$TEST_IMAGE" /bin/bash -c 'while :; do sleep 5; done' >/dev/null 2>&1 || return 1
+        "$TEST_IMAGE" "${pane[@]}" >/dev/null 2>&1 || return 1
 
     local i
     for ((i = 0; i < 60; i++)); do
@@ -650,6 +661,104 @@ test_dual_attach() {
     fi
 }
 
+# zellij's stock keybindings eat Ctrl+G (switch to locked mode) together with
+# Ctrl+Q/P/N/S/O/T/H/B, all of which the agents bind themselves -- Claude Code
+# uses Ctrl+G for "edit this prompt in $EDITOR".  base/zellij.kdl therefore
+# starts every session in locked mode, which forwards everything to the pane.
+#
+# The assertion is on what the *agent* sees, not on zellij's mode: the pane runs
+# `cat -v`, so a byte that arrives is a byte the agent would have received.
+# Ctrl+T and Ctrl+B ride along; ^O, ^R, ^V and ^W are deliberately left out of
+# the probe because the tty line discipline claims those before any program
+# sees them, whatever zellij does.  CR at the end, because a pane pty starts in
+# canonical mode and would otherwise hold the line back.
+test_ctrl_keys_reach_the_pane() {
+    run_test "Ctrl+G reaches the pane instead of switching zellij's mode"
+
+    local name="wkb$$"
+    if ! start_web_session "$name" none \
+            /bin/bash -c 'cat -v >/tmp/keys.txt'; then
+        fail "session did not start"
+        teardown_session "$name"
+        return
+    fi
+
+    local attach_id
+    attach_id="$(web POST "/api/sessions/${name}/attach" |
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("attach_id",""))' 2>/dev/null || true)"
+    if [[ -z "$attach_id" ]]; then
+        fail "could not attach"
+        teardown_session "$name"
+        return
+    fi
+
+    # The attach endpoint returns as soon as `podman exec ... zellij attach` is
+    # spawned, not when the client has connected -- and until it has, the PTY is
+    # still the shell's, in canonical mode, where zellij's own tcsetattr may
+    # flush anything already queued. Wait for the client, as test_dual_attach
+    # does, or this fails on a loaded machine for reasons unrelated to keys.
+    if ! wait_for_clients "$name" atleast 1 >/dev/null; then
+        fail "the zellij client never attached"
+        web DELETE "/api/attach/${attach_id}" >/dev/null 2>&1 || true
+        teardown_session "$name"
+        return
+    fi
+
+    # \x07 = Ctrl+G, \x14 = Ctrl+T, \x02 = Ctrl+B, then CR.
+    local payload
+    payload="$(python3 -c 'import base64; print(base64.b64encode(b"\x07\x14\x02\r").decode())')"
+    web POST "/api/attach/${attach_id}/input" \
+        -H 'Content-Type: application/json' \
+        --data-binary "{\"d\": \"${payload}\"}" >/dev/null 2>&1
+
+    local keys="" i
+    for ((i = 0; i < 40; i++)); do
+        keys="$(podman exec "sandbox-${name}" cat /tmp/keys.txt 2>/dev/null || true)"
+        [[ "$keys" == *'^G'* ]] && break
+        sleep 0.25
+    done
+
+    web DELETE "/api/attach/${attach_id}" >/dev/null 2>&1 || true
+    teardown_session "$name"
+
+    if [[ "$keys" == *'^G^T^B'* ]]; then
+        pass
+    elif [[ "$keys" == *'^G'* ]]; then
+        fail "Ctrl+G arrived but not Ctrl+T/Ctrl+B: $(tr -d '\n' <<<"$keys")"
+    else
+        fail "nothing reached the pane: '$(tr -d '\n' <<<"$keys")'"
+    fi
+}
+
+# A malformed keybinds block is silent at runtime -- zellij falls back to its
+# defaults and the keys go missing again -- so let zellij itself check the file
+# it was given.
+test_zellij_config_is_valid() {
+    run_test "the image's zellij config parses and starts locked"
+
+    local name="wt1$$"
+    if ! podman container exists "sandbox-${name}" 2>/dev/null; then
+        skip "no session"
+        return
+    fi
+
+    # The exit status is the reliable signal; the text is only for the report.
+    # Grepping the output for English words would pass a diagnostic worded any
+    # other way -- which is the silent fallback this test exists to catch.
+    local check="" checked=0 mode=0
+    check="$(podman exec "sandbox-${name}" zellij setup --check 2>&1)" || checked=$?
+    podman exec "sandbox-${name}" \
+        grep -q 'default_mode "locked"' /etc/zellij/config.kdl 2>/dev/null || mode=$?
+
+    if [[ $checked -eq 0 && $mode -eq 0 ]] && ! grep -qiE 'error|failed to' <<<"$check"; then
+        pass
+    elif [[ $mode -ne 0 ]]; then
+        fail "the image's config is not locked by default (grep exit ${mode})"
+    else
+        fail "zellij rejected the config (exit ${checked}): $(tr '\n' ' ' <<<"$check" | tail -c 120)"
+    fi
+}
+
 test_paste_image() {
     run_test "a pasted image lands in the container and its path is typed"
 
@@ -821,6 +930,7 @@ cleanup() {
     teardown_session "wt1$$"
     teardown_session "wt2$$"
     teardown_session "wt3$$"
+    teardown_session "wkb$$"
     podman rm -f "webtest-plain-$$" "sandbox-decoy$$" "sandbox-wtr$$" >/dev/null 2>&1 || true
     [[ -n "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
 }
@@ -854,6 +964,8 @@ test_web_session_labels
 test_web_session_listed
 test_list_shows_web_session
 test_dual_attach
+test_ctrl_keys_reach_the_pane
+test_zellij_config_is_valid
 test_paste_image
 test_attach_refuses_non_web_container
 test_invalid_session_name_rejected
