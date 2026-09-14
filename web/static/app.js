@@ -313,6 +313,98 @@ function clipboardImage(data) {
     .find((f) => (f.type || '').startsWith('image/')) || null;
 }
 
+// When the paste event last accounted for what the user pasted. The Ctrl+V
+// fallback compares against it rather than running unconditionally, so a
+// browser where the event works never sees the second route at all.
+let pasteHandledAt = 0;
+
+// A paste that produces nothing is otherwise silent, and the two halves of the
+// mechanism (the DOM event, the direct clipboard read) fail for different
+// reasons in different browsers -- so each step records what it saw and the
+// status line says it out loud when nothing came of it.
+let pasteTrace = [];
+
+function traceStatus() {
+  const line = pasteTrace.join(' · ') || 'nothing happened';
+  $('term-status').textContent = `Paste: ${line}`;
+  // Also in the console: the status line sits under a terminal that can be
+  // taller than the window, so it is easy to miss.
+  if (window.console) window.console.log(`paste: ${line}`);
+}
+
+function describe(data) {
+  if (!data) return 'event: no clipboardData';
+  const types = Array.from(data.types || []).join(',') || '-';
+  const items = Array.from(data.items || [])
+    .map((i) => `${i.kind}:${i.type || '?'}`).join(',') || '-';
+  return `event: types=[${types}] files=${(data.files || []).length} items=[${items}]`;
+}
+
+function sendImage(blob) {
+  if (blob.size > MAX_PASTE_BYTES) {
+    $('term-status').textContent = 'That image is larger than the 10 MB limit.';
+    return;
+  }
+  uploadImage(blob);
+}
+
+// Route two for Ctrl+V: ask the clipboard itself, rather than waiting for a
+// DataTransfer to be handed to the page. Chromium reaches this because its
+// paste event arrives without the image (or does not arrive); Firefox never
+// does, because there the event carries it -- which also means no Firefox
+// permission prompt.
+//
+// Text is handled here too, not only images: with Ctrl+V given back to the
+// browser, a browser that fires no paste event would otherwise paste nothing at
+// all. term.paste() is xterm's own entry point, so it stays bracketed.
+async function pasteFromClipboard(since) {
+  if (pasteHandledAt >= since || !state.term || !state.attachId) return;
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    pasteTrace.push('read: unavailable (insecure context?)');
+    traceStatus();
+    return;
+  }
+
+  let items;
+  try {
+    items = await navigator.clipboard.read();
+  } catch (err) {
+    // Chromium asks permission the first time and refuses outright in some
+    // windows; say so, because nothing else in the UI would.
+    pasteTrace.push(`read: ${err.name}: ${err.message}`);
+    traceStatus();
+    return;
+  }
+  if (pasteHandledAt >= since) return;      // the event won the race meanwhile
+
+  for (const item of items) {
+    const image = item.types.find((t) => t.startsWith('image/'));
+    if (image) {
+      pasteHandledAt = Date.now();
+      try {
+        sendImage(await item.getType(image));
+      } catch (err) {
+        pasteTrace.push(`read: ${image} failed: ${err.message}`);
+        traceStatus();
+      }
+      return;
+    }
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/plain')) continue;
+    pasteHandledAt = Date.now();
+    try {
+      state.term.paste(await (await item.getType('text/plain')).text());
+    } catch (err) {
+      pasteTrace.push(`read: text failed: ${err.message}`);
+      traceStatus();
+    }
+    return;
+  }
+  pasteTrace.push(`read: no image, types=[${items.map((i) => i.types.join(',')).join(' ')}]`);
+  traceStatus();
+}
+
 async function uploadImage(file) {
   $('term-status').textContent = `Uploading ${file.name || 'image'}…`;
   try {
@@ -401,8 +493,31 @@ async function attachTerminal(session) {
   // Cyrillic or Dvorak layout `key` is some other letter while keyCode is still
   // 86, so the two decisions would otherwise drift apart and Ctrl+V would send
   // ^V to the agent with no paste to show for it.
-  term.attachCustomKeyEventHandler((e) => !(
-    e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.keyCode === 86));
+  //
+  // Handing the key over is necessary but not sufficient: measured in Chromium
+  // 141 on a real session, a Ctrl+V with a screenshot on the clipboard produces
+  // no usable image for the page at all, while the identical build of this page
+  // works in Firefox. So the keystroke also arms a second route that does not
+  // depend on the paste event -- see pasteFromClipboard below -- and whichever
+  // arrives first wins.
+  term.attachCustomKeyEventHandler((e) => {
+    if (!e.ctrlKey || e.altKey || e.metaKey || e.keyCode !== 86) return true;
+
+    // keydown only: keypress and keyup would arm the same fallback twice.
+    if (e.type === 'keydown') {
+      pasteTrace = [e.shiftKey ? 'Ctrl+Shift+V' : 'Ctrl+V'];
+      const since = Date.now();
+      window.setTimeout(() => pasteFromClipboard(since), 200);
+    }
+
+    // Ctrl+Shift+V needs no handover -- xterm encodes no shifted Ctrl combo, so
+    // the browser already pastes on it -- but it does need the fallback armed
+    // above, because that is the gesture Chromium answers with the image
+    // deliberately stripped out (it means "paste as plain text" there, and
+    // measured on Chromium 141 it hands the page nothing usable). Only plain
+    // Ctrl+V has to be taken away from xterm, which would send ^V instead.
+    return e.shiftKey;
+  });
 
   const source = new EventSource(`/api/attach/${info.attach_id}/stream`);
   state.source = source;
@@ -456,15 +571,23 @@ function closeTerminal() {
 // An ordinary text paste falls through untouched.
 $('term').addEventListener('paste', (e) => {
   if (!state.term || !state.attachId) return;
-  const image = clipboardImage(e.clipboardData);
-  if (!image) return;
-  e.preventDefault();
-  e.stopPropagation();
-  if (image.size > MAX_PASTE_BYTES) {
-    $('term-status').textContent = 'That image is larger than the 10 MB limit.';
+  const data = e.clipboardData;
+  const image = clipboardImage(data);
+  if (image) {
+    e.preventDefault();
+    e.stopPropagation();
+    pasteHandledAt = Date.now();
+    sendImage(image);
     return;
   }
-  uploadImage(image);
+  // Text: xterm's own listener has it, bracketed. Recording it still matters --
+  // it is what keeps the Ctrl+V fallback from asking the clipboard (and, in
+  // Chromium, prompting for permission) about a paste already delivered.
+  if (data && data.getData('text/plain')) {
+    pasteHandledAt = Date.now();
+    return;
+  }
+  pasteTrace.push(describe(data));
 }, true);
 
 $('back').addEventListener('click', closeTerminal);

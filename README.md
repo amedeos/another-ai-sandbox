@@ -465,9 +465,13 @@ The web layer adds no privileges to the sandboxes and no new paths into them.
 
 ### Screenshot and image paste
 
-Press **Ctrl+V** with an image on the clipboard: it is uploaded into the session's `/tmp` and the resulting path is typed into the prompt, which is what the CLI agents accept. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Ordinary text paste is untouched and stays bracketed.
+Press **Ctrl+V** with an image on the clipboard (`Ctrl+Shift+V` works too): it is uploaded into the session's `/tmp` and the resulting path is typed into the prompt, which is what the CLI agents accept. On Chromium the first paste asks permission to read the clipboard — see below for why it has to. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Ordinary text paste is untouched and stays bracketed.
 
-`Ctrl+V` is handled by the browser rather than encoded as `^V`, which is what makes this work in Chromium as well as Firefox: xterm.js cancels the keystroke, so without the handover the only paste gestures left are ones Chromium deliberately strips the image out of (its `Ctrl+Shift+V` is *paste as plain text*). The clipboard is then read from both `items` and `files`, because Chromium puts a pasted bitmap only in the former. The cost is that a literal `^V` cannot be typed in the browser terminal.
+`Ctrl+V` is handled by the browser rather than encoded as `^V`: xterm.js otherwise cancels the keystroke, and the paste gestures that remain are ones Chromium strips the image out of (its `Ctrl+Shift+V` is *paste as plain text*). The cost is that a literal `^V` cannot be typed in the browser terminal.
+
+That handover is enough for Firefox, whose paste event carries the image — read from `items` as well as `files`, because Chromium puts a pasted bitmap only in the former. Chromium hands the page no usable image on either gesture (verified on 141 against a KDE Spectacle screenshot), so both `Ctrl+V` and `Ctrl+Shift+V` arm a second route 200 ms later: `navigator.clipboard.read()`, which asks the clipboard directly and needs no paste event. The dashboard is loopback-only, hence a secure context, which is what makes that API available at all; Chromium asks permission the first time.
+
+Whichever route arrives first wins, and a browser whose event carried the image never reaches the second one — so Firefox is never prompted. Text goes down the second route too when it has to, through xterm's own `paste()`, so it stays bracketed. When neither route produces anything the status line under the terminal says which step came up empty, because a silent paste is otherwise indistinguishable from a keystroke that never arrived.
 
 ### Terminal size with two clients
 
