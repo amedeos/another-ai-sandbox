@@ -152,8 +152,7 @@ skip() {
 # gets a pane that records what the agent would have received.
 start_web_session() {
     local name="$1" network="${2:-none}"
-    if [[ $# -gt 2 ]]; then shift 2; else shift $#; fi
-    local -a pane=("$@")
+    local -a pane=("${@:3}")
     if [[ ${#pane[@]} -eq 0 ]]; then
         pane=(/bin/bash -c 'while :; do sleep 5; done')
     fi
@@ -693,6 +692,18 @@ test_ctrl_keys_reach_the_pane() {
         return
     fi
 
+    # The attach endpoint returns as soon as `podman exec ... zellij attach` is
+    # spawned, not when the client has connected -- and until it has, the PTY is
+    # still the shell's, in canonical mode, where zellij's own tcsetattr may
+    # flush anything already queued. Wait for the client, as test_dual_attach
+    # does, or this fails on a loaded machine for reasons unrelated to keys.
+    if ! wait_for_clients "$name" atleast 1 >/dev/null; then
+        fail "the zellij client never attached"
+        web DELETE "/api/attach/${attach_id}" >/dev/null 2>&1 || true
+        teardown_session "$name"
+        return
+    fi
+
     # \x07 = Ctrl+G, \x14 = Ctrl+T, \x02 = Ctrl+B, then CR.
     local payload
     payload="$(python3 -c 'import base64; print(base64.b64encode(b"\x07\x14\x02\r").decode())')"
@@ -731,17 +742,20 @@ test_zellij_config_is_valid() {
         return
     fi
 
-    local check="" mode=""
-    check="$(podman exec "sandbox-${name}" zellij setup --check 2>&1 || true)"
-    mode="$(podman exec "sandbox-${name}" \
-        grep -c 'default_mode "locked"' /etc/zellij/config.kdl 2>/dev/null || true)"
+    # The exit status is the reliable signal; the text is only for the report.
+    # Grepping the output for English words would pass a diagnostic worded any
+    # other way -- which is the silent fallback this test exists to catch.
+    local check="" checked=0 mode=0
+    check="$(podman exec "sandbox-${name}" zellij setup --check 2>&1)" || checked=$?
+    podman exec "sandbox-${name}" \
+        grep -q 'default_mode "locked"' /etc/zellij/config.kdl 2>/dev/null || mode=$?
 
-    if [[ "$mode" == 1 ]] && ! grep -qiE 'error|failed to' <<<"$check"; then
+    if [[ $checked -eq 0 && $mode -eq 0 ]] && ! grep -qiE 'error|failed to' <<<"$check"; then
         pass
-    elif [[ "$mode" != 1 ]]; then
-        fail "config is not locked by default"
+    elif [[ $mode -ne 0 ]]; then
+        fail "the image's config is not locked by default (grep exit ${mode})"
     else
-        fail "zellij rejected the config: $(grep -iE 'error|failed to' <<<"$check" | head -1)"
+        fail "zellij rejected the config (exit ${checked}): $(tr '\n' ' ' <<<"$check" | tail -c 120)"
     fi
 }
 

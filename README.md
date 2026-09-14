@@ -444,7 +444,7 @@ The agent runs inside a detached [zellij](https://zellij.dev) session, which is 
 
 The session starts in zellij's **locked** mode, so every keystroke goes to the agent. This is not cosmetic: zellij's stock bindings claim `Ctrl+G`, `Ctrl+Q`, `Ctrl+P`, `Ctrl+N`, `Ctrl+S`, `Ctrl+O`, `Ctrl+T`, `Ctrl+H`, `Ctrl+B` and most `Alt` keys before the pane sees them, and the agents bind several of those themselves — Claude Code alone uses `Ctrl+G` (edit the prompt in `$EDITOR`), `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+R`.
 
-`Alt+g` is the single exception and the one door into zellij's own keybindings: press it for normal mode, and `Ctrl+o d` then detaches a terminal client (`Ctrl+g` locks again). A browser client just goes Back, or closes the tab. Since locked mode also keeps `Ctrl+Q` away from zellij, no stray keystroke can quit the session out from under the agent.
+`Alt+g` is the single exception and the one door into zellij's own keybindings: press it for normal mode, and `Ctrl+o d` then detaches a terminal client (`Ctrl+g` locks again). A browser client just goes Back, or closes the tab. Zellij's `Quit` is unbound outright, in normal mode too and not merely unreachable while locked: it sits on `Ctrl+Q`, one fumbled key from the `Ctrl+O` of that chord, and a session quit that way takes the container with it — `--rm` then removes the tmpfs `/home/agent` and `/tmp` along with the agent's state.
 
 The editor behind `Ctrl+G` is the image's Vim: `EDITOR` and `VISUAL` are set in the image, because zellij hands its panes container PID 1's environment and `/home/agent` is a tmpfs where no dotfile would survive.
 

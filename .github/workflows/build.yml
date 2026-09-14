@@ -70,18 +70,28 @@ jobs:
       # config here, where a typo is cheap to notice.
       - name: Smoke test – zellij config parses
         run: |
+          # Inside the image, not in the checkout: a COPY that stopped happening
+          # is exactly the failure this is here for, and base/zellij.kdl would
+          # match regardless. `|| status=$?` because the job shell is `bash -e`,
+          # which would otherwise abort before the output could be printed.
+          status=0
           out=$(podman run --rm --entrypoint zellij \
-            localhost/agent-base:latest setup --check 2>&1)
+            localhost/agent-base:latest setup --check 2>&1) || status=$?
           echo "$out"
-          grep -q 'default_mode "locked"' base/zellij.kdl
+          [ "$status" -eq 0 ]
           ! grep -qiE 'error|failed to' <<<"$out"
+          podman run --rm --entrypoint grep localhost/agent-base:latest \
+            -q 'default_mode "locked"' /etc/zellij/config.kdl
 
       # Claude Code's Ctrl+G opens the prompt in $EDITOR, so the editor and the
       # variables that point at it are both part of the image's contract.
       - name: Smoke test – editor for Ctrl+G
         run: |
-          podman run --rm --entrypoint vim \
-            localhost/agent-base:latest --version | head -1
+          # No pipe: the job shell has no pipefail, so `podman | head` would
+          # report head's success and a missing vim would pass unnoticed.
+          ver=$(podman run --rm --entrypoint vim \
+            localhost/agent-base:latest --version)
+          echo "${ver%%$'\n'*}"
           out=$(podman run --rm --entrypoint printenv \
             localhost/agent-base:latest EDITOR VISUAL | tr '\n' ' ')
           [[ "$out" == "vim vim " ]]

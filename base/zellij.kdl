@@ -41,11 +41,17 @@ show_release_notes false
 // clear-defaults on the locked block is load-bearing: stock locked mode reserves
 // Ctrl+G as its way back to normal mode -- the very key this is about.  Alt+G
 // takes over that job, which is the one door to zellij's own keybindings (and
-// therefore to `Ctrl+o d` detach) for a terminal client.  A consequence worth
-// having: Ctrl+Q can no longer reach zellij's Quit and kill the session.
+// therefore to `Ctrl+o d` detach) for a terminal client.
 default_mode "locked"
 
 keybinds {
+    // Quit, unbound in every mode rather than merely unreachable while locked.
+    // It is Ctrl+Q, one fumbled key from the Ctrl+O of the detach chord, and a
+    // session torn down that way takes the container with it: --rm then removes
+    // the tmpfs /home/agent and /tmp, agent state included.  Nothing here needs
+    // it -- a session ends when the agent exits, or via `ai-sandbox stop`.
+    unbind "Ctrl q"
+
     locked clear-defaults=true {
         bind "Alt g" { SwitchToMode "Normal"; }
     }

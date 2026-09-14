@@ -313,10 +313,29 @@ function clipboardImage(data) {
     .find((f) => (f.type || '').startsWith('image/')) || null;
 }
 
-// When the paste event last accounted for what the user pasted. The Ctrl+V
-// fallback compares against it rather than running unconditionally, so a
-// browser where the event works never sees the second route at all.
-let pasteHandledAt = 0;
+// One paste gesture in flight at a time. Both routes have to consult it before
+// acting, and whichever gets there first consumes it: the paste event usually
+// wins, but a clipboard read that was already waiting on Chromium's permission
+// prompt can land afterwards, and then the loser must do nothing rather than
+// deliver the same image twice.
+//
+// The gesture also remembers the attachment it was armed for. A clipboard read
+// can be pending for as long as the prompt is up, which is long enough to go
+// Back and attach a different session -- and an image that arrives then belongs
+// to nobody, least of all to the other sandbox's agent.
+let pasteGesture = null;
+
+function armPaste(label, fallback) {
+  pasteTrace = [label];
+  pasteGesture = { attachId: state.attachId, fallback: fallback === true };
+  return pasteGesture;
+}
+
+function claimPaste(gesture) {
+  if (!gesture || gesture !== pasteGesture) return false;   // already consumed
+  pasteGesture = null;
+  return Boolean(state.attachId) && gesture.attachId === state.attachId;
+}
 
 // A paste that produces nothing is otherwise silent, and the two halves of the
 // mechanism (the DOM event, the direct clipboard read) fail for different
@@ -357,9 +376,10 @@ function sendImage(blob) {
 // Text is handled here too, not only images: with Ctrl+V given back to the
 // browser, a browser that fires no paste event would otherwise paste nothing at
 // all. term.paste() is xterm's own entry point, so it stays bracketed.
-async function pasteFromClipboard(since) {
-  if (pasteHandledAt >= since || !state.term || !state.attachId) return;
+async function pasteFromClipboard(gesture) {
+  if (gesture !== pasteGesture || !state.term || !state.attachId) return;
   if (!navigator.clipboard || !navigator.clipboard.read) {
+    claimPaste(gesture);
     pasteTrace.push('read: unavailable (insecure context?)');
     traceStatus();
     return;
@@ -371,16 +391,18 @@ async function pasteFromClipboard(since) {
   } catch (err) {
     // Chromium asks permission the first time and refuses outright in some
     // windows; say so, because nothing else in the UI would.
+    claimPaste(gesture);
     pasteTrace.push(`read: ${err.name}: ${err.message}`);
     traceStatus();
     return;
   }
-  if (pasteHandledAt >= since) return;      // the event won the race meanwhile
 
   for (const item of items) {
     const image = item.types.find((t) => t.startsWith('image/'));
     if (image) {
-      pasteHandledAt = Date.now();
+      // Claimed only now, after the await: the event may have delivered this
+      // same paste while the read was waiting on the permission prompt.
+      if (!claimPaste(gesture)) return;
       try {
         sendImage(await item.getType(image));
       } catch (err) {
@@ -392,7 +414,7 @@ async function pasteFromClipboard(since) {
   }
   for (const item of items) {
     if (!item.types.includes('text/plain')) continue;
-    pasteHandledAt = Date.now();
+    if (!claimPaste(gesture)) return;
     try {
       state.term.paste(await (await item.getType('text/plain')).text());
     } catch (err) {
@@ -401,6 +423,7 @@ async function pasteFromClipboard(since) {
     }
     return;
   }
+  if (!claimPaste(gesture)) return;
   pasteTrace.push(`read: no image, types=[${items.map((i) => i.types.join(',')).join(' ')}]`);
   traceStatus();
 }
@@ -501,22 +524,30 @@ async function attachTerminal(session) {
   // depend on the paste event -- see pasteFromClipboard below -- and whichever
   // arrives first wins.
   term.attachCustomKeyEventHandler((e) => {
-    if (!e.ctrlKey || e.altKey || e.metaKey || e.keyCode !== 86) return true;
+    const isPaste = e.keyCode === 86 && !e.altKey
+      && ((e.ctrlKey && !e.metaKey) || (e.metaKey && !e.ctrlKey));
+    if (!isPaste) return true;
 
-    // keydown only: keypress and keyup would arm the same fallback twice.
+    // keydown only: keypress and keyup would arm the same gesture twice.
     if (e.type === 'keydown') {
-      pasteTrace = [e.shiftKey ? 'Ctrl+Shift+V' : 'Ctrl+V'];
-      const since = Date.now();
-      window.setTimeout(() => pasteFromClipboard(since), 200);
+      let label = 'Ctrl+V';
+      if (e.metaKey) label = 'Cmd+V';
+      else if (e.shiftKey) label = 'Ctrl+Shift+V';
+      window.setTimeout(() => pasteFromClipboard(armPaste(label, true)), 200);
     }
 
-    // Ctrl+Shift+V needs no handover -- xterm encodes no shifted Ctrl combo, so
-    // the browser already pastes on it -- but it does need the fallback armed
-    // above, because that is the gesture Chromium answers with the image
-    // deliberately stripped out (it means "paste as plain text" there, and
-    // measured on Chromium 141 it hands the page nothing usable). Only plain
-    // Ctrl+V has to be taken away from xterm, which would send ^V instead.
-    return e.shiftKey;
+    // Only plain Ctrl+V has to be taken away from xterm, which would send ^V
+    // instead. Ctrl+Shift+V and Cmd+V are not encoded by xterm at all, so the
+    // browser already pastes on them and they need nothing beyond the gesture
+    // armed above -- which they do need, because Ctrl+Shift+V is precisely the
+    // gesture Chromium answers with the image stripped out (it means "paste as
+    // plain text" there), and Cmd+V is the macOS one.
+    //
+    // Never on keyup: a false return there also skips the focus() and cursor
+    // update xterm performs on every key release (verified in the pinned 5.5.0
+    // bundle: `_keyUp` short-circuits on a false custom handler), which is how
+    // the hidden textarea gets focus back after a paste moved it.
+    return e.shiftKey || e.metaKey || e.type === 'keyup';
   });
 
   const source = new EventSource(`/api/attach/${info.attach_id}/stream`);
@@ -572,22 +603,52 @@ function closeTerminal() {
 $('term').addEventListener('paste', (e) => {
   if (!state.term || !state.attachId) return;
   const data = e.clipboardData;
+  // A gesture nobody armed is one of the browser's own paste routes -- the
+  // context menu, middle click, Shift+Insert -- and gets no second route.
+  const gesture = pasteGesture || armPaste('paste', false);
+
   const image = clipboardImage(data);
-  if (image) {
+  const claimsImage = Boolean(data)
+    && Array.from(data.types || []).some((t) => t.startsWith('image/'));
+
+  // An image paste must never reach xterm, which would type the image's
+  // text/plain sibling (a URL, or the alt text) at the agent's prompt. That
+  // holds even when the image could not be extracted: the clipboard saying
+  // "image" is enough to know the text beside it is not what was pasted.
+  if (image || claimsImage) {
     e.preventDefault();
     e.stopPropagation();
-    pasteHandledAt = Date.now();
-    sendImage(image);
+  }
+
+  if (image) {
+    if (claimPaste(gesture)) sendImage(image);
     return;
   }
-  // Text: xterm's own listener has it, bracketed. Recording it still matters --
-  // it is what keeps the Ctrl+V fallback from asking the clipboard (and, in
-  // Chromium, prompting for permission) about a paste already delivered.
+
+  if (claimsImage) {
+    // Chromium: the clipboard has an image, the event did not carry it. Leave
+    // the gesture for the clipboard read -- and start one, if this gesture came
+    // from a browser route that armed none.
+    if (!gesture.fallback) {
+      gesture.fallback = true;
+      window.setTimeout(() => pasteFromClipboard(gesture), 0);
+    }
+    return;
+  }
+
+  // Text: xterm's own listener has it, bracketed. Claiming it is what keeps the
+  // clipboard read from asking (and, in Chromium, prompting for permission)
+  // about a paste already delivered.
   if (data && data.getData('text/plain')) {
-    pasteHandledAt = Date.now();
+    claimPaste(gesture);
     return;
   }
+
   pasteTrace.push(describe(data));
+  if (!gesture.fallback) {
+    claimPaste(gesture);
+    traceStatus();                      // nothing else is coming for this one
+  }
 }, true);
 
 $('back').addEventListener('click', closeTerminal);

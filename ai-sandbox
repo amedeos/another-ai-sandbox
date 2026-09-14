@@ -304,6 +304,15 @@ wait_for_session() {
     return 1
 }
 
+# The detach chord, in one place: the session runs in zellij's locked mode so
+# that every key reaches the agent (see base/zellij.kdl), which is why detaching
+# takes Alt-g first -- it is the one binding locked mode keeps for zellij.
+# Printed before attaching, so it is on screen again once zellij's alternate
+# screen goes away.
+detach_hint() {
+    echo -e "  Detach with ${CYAN}Alt-g${NC} then ${CYAN}Ctrl-o d${NC} — the agent keeps running."
+}
+
 # Attach this terminal to a running web session as an ordinary zellij client.
 do_attach() {
     local session="$1" ctr
@@ -500,6 +509,7 @@ case "${1:-}" in
             echo -e "${RED}Usage: ai-sandbox attach <session>${NC}" >&2
             exit 1
         fi
+        detach_hint
         do_attach "$2"
         exit $?
         ;;
@@ -1175,10 +1185,7 @@ if [[ "$WEB_MODE" == true ]]; then
         exit 0
     fi
 
-    # The session starts in zellij's locked mode so that every key reaches the
-    # agent (see base/zellij.kdl), which is also why detaching takes Alt-g
-    # first: it is the one binding locked mode keeps for zellij itself.
-    echo -e "  Detach with ${CYAN}Alt-g${NC} then ${CYAN}Ctrl-o d${NC} — the agent keeps running."
+    detach_hint
     echo -e "  Reattach with: ${CYAN}ai-sandbox attach ${SESSION}${NC}"
     echo ""
 
