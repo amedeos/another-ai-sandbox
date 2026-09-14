@@ -315,7 +315,7 @@ The [web UI](#web-ui) does not change this. It publishes no container port and a
 
 ## Base Image
 
-Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
 
 It also carries **zellij** (~44 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
 
@@ -392,7 +392,7 @@ It is entirely opt-in. A sandbox is reachable from the browser **only** if it wa
 
 ```bash
 # Start a detachable session and attach this terminal to it.
-# Ctrl-o d detaches — the agent keeps running.
+# Alt-g then Ctrl-o d detaches — the agent keeps running.
 ai-sandbox --web claude ~/my-project
 
 # From another terminal, or after closing the first one:
@@ -440,6 +440,14 @@ The session name is the single identifier throughout: it is the zellij session, 
 
 The agent runs inside a detached [zellij](https://zellij.dev) session, which is what makes detaching safe: the terminal and the browser are both ordinary zellij clients, and closing either one leaves the agent untouched. Container PID 1 is a small supervisor that outlives every client and exits only when the agent does, at which point `--rm` removes the container.
 
+### Keys, and how to detach
+
+The session starts in zellij's **locked** mode, so every keystroke goes to the agent. This is not cosmetic: zellij's stock bindings claim `Ctrl+G`, `Ctrl+Q`, `Ctrl+P`, `Ctrl+N`, `Ctrl+S`, `Ctrl+O`, `Ctrl+T`, `Ctrl+H`, `Ctrl+B` and most `Alt` keys before the pane sees them, and the agents bind several of those themselves — Claude Code alone uses `Ctrl+G` (edit the prompt in `$EDITOR`), `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+R`.
+
+`Alt+g` is the single exception and the one door into zellij's own keybindings: press it for normal mode, and `Ctrl+o d` then detaches a terminal client (`Ctrl+g` locks again). A browser client just goes Back, or closes the tab. Since locked mode also keeps `Ctrl+Q` away from zellij, no stray keystroke can quit the session out from under the agent.
+
+The editor behind `Ctrl+G` is the image's Vim: `EDITOR` and `VISUAL` are set in the image, because zellij hands its panes container PID 1's environment and `/home/agent` is a tmpfs where no dotfile would survive.
+
 ### Security
 
 The web layer adds no privileges to the sandboxes and no new paths into them.
@@ -457,7 +465,9 @@ The web layer adds no privileges to the sandboxes and no new paths into them.
 
 ### Screenshot and image paste
 
-Pasting an image into the browser terminal uploads it into the session's `/tmp` and types the resulting path into the prompt, which is what the CLI agents accept. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Ordinary text paste is untouched and stays bracketed.
+Press **Ctrl+V** with an image on the clipboard: it is uploaded into the session's `/tmp` and the resulting path is typed into the prompt, which is what the CLI agents accept. PNG, JPEG, GIF and WebP up to 10 MB; the type is confirmed by inspecting the file's magic bytes, and the filename is generated server-side. Ordinary text paste is untouched and stays bracketed.
+
+`Ctrl+V` is handled by the browser rather than encoded as `^V`, which is what makes this work in Chromium as well as Firefox: xterm.js cancels the keystroke, so without the handover the only paste gestures left are ones Chromium deliberately strips the image out of (its `Ctrl+Shift+V` is *paste as plain text*). The clipboard is then read from both `items` and `files`, because Chromium puts a pasted bitmap only in the former. The cost is that a literal `^V` cannot be typed in the browser terminal.
 
 ### Terminal size with two clients
 

@@ -64,6 +64,28 @@ jobs:
           podman run --rm --entrypoint zellij \
             localhost/agent-base:latest --version
 
+      # A keybinds block that does not parse is silent at runtime: zellij falls
+      # back to its defaults, and Ctrl+G (and Ctrl+O, Ctrl+T, …) go back to
+      # being swallowed before the agent sees them. Let zellij read its own
+      # config here, where a typo is cheap to notice.
+      - name: Smoke test – zellij config parses
+        run: |
+          out=$(podman run --rm --entrypoint zellij \
+            localhost/agent-base:latest setup --check 2>&1)
+          echo "$out"
+          grep -q 'default_mode "locked"' base/zellij.kdl
+          ! grep -qiE 'error|failed to' <<<"$out"
+
+      # Claude Code's Ctrl+G opens the prompt in $EDITOR, so the editor and the
+      # variables that point at it are both part of the image's contract.
+      - name: Smoke test – editor for Ctrl+G
+        run: |
+          podman run --rm --entrypoint vim \
+            localhost/agent-base:latest --version | head -1
+          out=$(podman run --rm --entrypoint printenv \
+            localhost/agent-base:latest EDITOR VISUAL | tr '\n' ' ')
+          [[ "$out" == "vim vim " ]]
+
       # With AI_SANDBOX_WEB unset the supervisor must be a transparent exec,
       # which is what keeps non-web sessions unchanged.
       - name: Smoke test – supervisor passthrough

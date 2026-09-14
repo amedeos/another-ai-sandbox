@@ -12,6 +12,9 @@
 
 const BASE_FONT = 14;
 const INPUT_FLUSH_MS = 12;
+// Mirrors MAX_PASTE_BYTES in the server: refuse an oversized image here rather
+// than push megabytes at a request that is going to be rejected anyway.
+const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
 const MIN_ZOOM = 0.5;
@@ -289,6 +292,27 @@ function flushInput() {
   }).catch(() => {});
 }
 
+// The image a paste carries, or null for an ordinary text paste.
+//
+// Browsers disagree about where it lives: Chromium exposes a pasted *bitmap*
+// only through items[] (kind 'file', getAsFile()) and leaves files empty unless
+// an actual file was copied from a file manager, while Firefox fills both (and
+// lists the image twice). Read items first, fall back to files.
+//
+// Synchronous by necessity: a DataTransferItemList is emptied the moment the
+// paste handler returns, so the File has to be taken out before any await.
+function clipboardImage(data) {
+  if (!data) return null;
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind === 'file' && (item.type || '').startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) return file;
+    }
+  }
+  return Array.from(data.files || [])
+    .find((f) => (f.type || '').startsWith('image/')) || null;
+}
+
 async function uploadImage(file) {
   $('term-status').textContent = `Uploading ${file.name || 'image'}…`;
   try {
@@ -354,17 +378,31 @@ async function attachTerminal(session) {
   term.onData((data) => { state.pending.push(data); });
   state.flusher = window.setInterval(flushInput, INPUT_FLUSH_MS);
 
-  // Image paste: intercept only when the clipboard actually carries files, so
-  // ordinary text paste still goes through xterm.js (and stays bracketed).
-  if (term.textarea) {
-    term.textarea.addEventListener('paste', (e) => {
-      const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
-      const images = files.filter((f) => f.type.startsWith('image/'));
-      if (!images.length) return;
-      e.preventDefault();
-      uploadImage(images[0]);
-    });
-  }
+  // Hand Ctrl+V back to the browser, which is what makes an image paste
+  // possible at all: xterm.js encodes it as ^V and cancels the DOM event, so no
+  // `paste` event is ever produced, and the gestures that do produce one are not
+  // equivalent -- Chromium's Ctrl+Shift+V is *paste as plain text*, and the
+  // DataTransfer it builds has the image stripped out of it. Returning false
+  // makes xterm skip the key WITHOUT cancelling it, so the browser performs a
+  // real paste: xterm's own paste listener still handles text (bracketed, as
+  // before) and the capture-phase listener below takes the image.
+  //
+  // ^V therefore cannot be typed in the browser terminal, which is the accepted
+  // trade for the paste every user expects. Cmd+V on macOS was never encoded by
+  // xterm, so it needed no such handover.
+  //
+  // Every event type, not keydown alone: xterm consults this handler from its
+  // keypress path too and cancels the event there before it ever looks at
+  // ctrlKey, and Gecko still dispatches a keypress for Ctrl+letter -- cancel
+  // that one and Firefox stops pasting as well. keyup is inert either way.
+  //
+  // keyCode, deprecated as it is, and not `key`: this has to match exactly the
+  // event xterm would have encoded as ^V, and xterm switches on keyCode. On a
+  // Cyrillic or Dvorak layout `key` is some other letter while keyCode is still
+  // 86, so the two decisions would otherwise drift apart and Ctrl+V would send
+  // ^V to the agent with no paste to show for it.
+  term.attachCustomKeyEventHandler((e) => !(
+    e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.keyCode === 86));
 
   const source = new EventSource(`/api/attach/${info.attach_id}/stream`);
   state.source = source;
@@ -400,6 +438,34 @@ function closeTerminal() {
   $('crumb').textContent = '';
   refresh();
 }
+
+// Image paste, in the capture phase and on the container rather than on the
+// terminal itself, for two reasons:
+//
+//   - xterm registers its own paste listener on both its textarea and its root
+//     element during term.open(), i.e. before any listener added afterwards,
+//     and it forwards the clipboard's text/plain sibling -- for an image copied
+//     from a web page, a URL or the alt text -- to the agent as a bracketed
+//     paste. An ancestor capture listener runs first in every browser, so
+//     stopPropagation() here keeps xterm out of the image case entirely.
+//   - #term outlives every attachment, so this is registered exactly once.
+//     Registered per attach it would stack a listener per Back/Attach cycle and
+//     upload the same image once per cycle: stopPropagation does not stop
+//     sibling listeners on the same node.
+//
+// An ordinary text paste falls through untouched.
+$('term').addEventListener('paste', (e) => {
+  if (!state.term || !state.attachId) return;
+  const image = clipboardImage(e.clipboardData);
+  if (!image) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (image.size > MAX_PASTE_BYTES) {
+    $('term-status').textContent = 'That image is larger than the 10 MB limit.';
+    return;
+  }
+  uploadImage(image);
+}, true);
 
 $('back').addEventListener('click', closeTerminal);
 $('zoom-in').addEventListener('click', () => setZoom(state.fontScale * 1.15));

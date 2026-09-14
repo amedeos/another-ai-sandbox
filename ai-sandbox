@@ -1175,7 +1175,10 @@ if [[ "$WEB_MODE" == true ]]; then
         exit 0
     fi
 
-    echo -e "  Detach with ${CYAN}Ctrl-o d${NC} — the agent keeps running."
+    # The session starts in zellij's locked mode so that every key reaches the
+    # agent (see base/zellij.kdl), which is also why detaching takes Alt-g
+    # first: it is the one binding locked mode keeps for zellij itself.
+    echo -e "  Detach with ${CYAN}Alt-g${NC} then ${CYAN}Ctrl-o d${NC} — the agent keeps running."
     echo -e "  Reattach with: ${CYAN}ai-sandbox attach ${SESSION}${NC}"
     echo ""
 
