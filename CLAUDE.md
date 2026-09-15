@@ -67,7 +67,7 @@ There are three main Bash scripts, one Python script, and a BPF subsystem:
 
 Two GitHub Actions workflows on push/PR to `main`:
 - **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` (it is Python and must stay out of the ShellCheck sweep); Hadolint on all Containerfiles
-- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` in the base image, and `ai-sandbox-supervise` passthrough)
+- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` and `uv --version` in the base image, and `ai-sandbox-supervise` passthrough)
 
 ## Git Policy
 

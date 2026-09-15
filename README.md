@@ -315,9 +315,11 @@ The [web UI](#web-ui) does not change this. It publishes no container port and a
 
 ## Base Image
 
-Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, uv, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
 
 It also carries **zellij** (~44 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
+
+Two `uv` defaults are overridden in the image, both because `/home/agent` is a tmpfs while the project is a bind mount: `UV_LINK_MODE=copy`, since uv's cache and the `.venv` it populates sit on different filesystems and hardlinking would fall back to copying with a warning on every install; and `UV_PYTHON_PREFERENCE=system`, so the image's own Python interpreters stay the first choice over a managed one installed mid-session, which would live in the tmpfs and disappear at exit. Downloading an interpreter remains the fallback for a version that is not in the image.
 
 The image is size-optimised: weak dependencies are skipped (`install_weak_deps=False`), documentation is excluded (`tsflags=nodocs`), mupdf's unused GUI dependencies (mesa, llvm-libs, X11) are removed after install, ELF binaries are stripped, and everything runs in a single layer.
 
