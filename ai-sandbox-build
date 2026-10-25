@@ -12,6 +12,15 @@
 #   ai-sandbox-build codex        # only codex (requires base)
 #   ai-sandbox-build cursor       # only cursor-agent (requires base)
 #   ai-sandbox-build opencode     # only opencode (requires base)
+#
+#   --with-prusaslicer / --without-prusaslicer (alias --no-prusaslicer) include
+#   or leave out PrusaSlicer in the base image (and so in every agent image).
+#   Without either flag the choice already made is kept: it is read from the
+#   existing base image's ai-sandbox.prusaslicer label, and is "without" when
+#   there is no image yet.
+#
+# Exit status: 0 on success, 3 when the base image failed to build with
+# PrusaSlicer (install.sh then retries without it), 1 on any other failure.
 # =============================================================================
 set -euo pipefail
 
@@ -28,8 +37,12 @@ log()  { echo -e "${GREEN}[BUILD]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+usage_line() {
+    echo "Usage: ai-sandbox-build [--with-prusaslicer|--without-prusaslicer] [base|claude|codex|cursor|opencode|all]"
+}
+
 usage() {
-    echo "Usage: ai-sandbox-build [base|claude|codex|cursor|opencode|all]"
+    usage_line
     echo ""
     echo "Targets:"
     echo "  base     - Build the base image only"
@@ -39,6 +52,11 @@ usage() {
     echo "  opencode - Build base + opencode image"
     echo "  all      - Build base + all agent images (default)"
     echo ""
+    echo "Options:"
+    echo "  --with-prusaslicer     Include PrusaSlicer (headless slicing) in the base image"
+    echo "  --without-prusaslicer  Leave it out (alias: --no-prusaslicer)"
+    echo "  Without either, the existing base image's choice is kept (none: without)."
+    echo ""
     echo "Note: claude-vertex uses the claude image, no separate build needed."
     echo ""
     echo "Data directory: ${DATA_DIR}"
@@ -46,9 +64,30 @@ usage() {
     exit 0
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    usage
-fi
+TARGET=""
+WITH_PRUSASLICER=""    # empty = keep what the existing base image has
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)              usage ;;
+        --with-prusaslicer)     WITH_PRUSASLICER=1 ;;
+        --without-prusaslicer|--no-prusaslicer) WITH_PRUSASLICER=0 ;;
+        -*)
+            err "Unknown option: $1"
+            usage_line
+            exit 1
+            ;;
+        *)
+            if [[ -n "$TARGET" ]]; then
+                err "Only one target can be given (got '${TARGET}' and '$1')"
+                exit 1
+            fi
+            TARGET="$1"
+            ;;
+    esac
+    shift
+done
+TARGET="${TARGET:-all}"
 
 if [[ ! -d "$DATA_DIR" ]]; then
     err "Data directory not found: ${DATA_DIR}"
@@ -56,10 +95,12 @@ if [[ ! -d "$DATA_DIR" ]]; then
     exit 1
 fi
 
+# Any arguments after the third are passed on to podman build.
 build_image() {
     local name="$1"
     local dir="$2"
     local tag="$3"
+    shift 3
 
     if [[ ! -f "${dir}/Containerfile" ]]; then
         err "Containerfile not found: ${dir}/Containerfile"
@@ -69,9 +110,10 @@ build_image() {
     log "Building ${name} -> ${tag}"
     "${BUILDER}" build \
         --format docker \
+        "$@" \
         --tag "${tag}" \
         --file "${dir}/Containerfile" \
-        "${dir}"
+        "${dir}" || return 1
     log "${name} built successfully"
 }
 
@@ -80,9 +122,71 @@ pull_base_image() {
     "${BUILDER}" pull "${BASE_IMAGE}"
 }
 
+# Without a flag, keep the PrusaSlicer choice recorded on the existing base
+# image, so that a plain `ai-sandbox --build all` does not drop what install.sh
+# put there.  No image yet means nothing to keep; an image built before the
+# label existed has no PrusaSlicer, so an empty label reads as 0.
+resolve_prusaslicer() {
+    local image="localhost/agent-base:latest"
+    local existing="" rc=0
+
+    # `image exists` is 1 for "no such image"; anything else is podman failing,
+    # which must not be read as "nothing to keep".
+    "${BUILDER}" image exists "${image}" || rc=$?
+    case "$rc" in
+        0)
+            if ! existing=$("${BUILDER}" image inspect \
+                    --format '{{index .Config.Labels "ai-sandbox.prusaslicer"}}' "${image}"); then
+                err "Could not read the labels of ${image}"
+                exit 1
+            fi
+            [[ "$existing" == 1 ]] || existing=0
+            ;;
+        1) ;;
+        *)
+            err "podman image exists ${image} failed (exit ${rc})"
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "$WITH_PRUSASLICER" ]]; then
+        if [[ "$WITH_PRUSASLICER" == 1 ]]; then
+            log "PrusaSlicer: included (--with-prusaslicer)"
+        else
+            log "PrusaSlicer: not included (--without-prusaslicer)"
+        fi
+    elif [[ -z "$existing" ]]; then
+        WITH_PRUSASLICER=0
+        log "PrusaSlicer: not included (no existing base image; --with-prusaslicer to add it)"
+    elif [[ "$existing" == 1 ]]; then
+        WITH_PRUSASLICER=1
+        log "PrusaSlicer: included (kept from the existing image; --without-prusaslicer to drop it)"
+    else
+        WITH_PRUSASLICER=0
+        log "PrusaSlicer: not included (kept from the existing image; --with-prusaslicer to add it)"
+    fi
+
+    # Agent images are built FROM the base, so changing it under a single
+    # target leaves every other agent image on the previous base.
+    if [[ -n "$existing" && "$WITH_PRUSASLICER" != "$existing" && "$TARGET" != all ]]; then
+        local before="without"
+        [[ "$existing" == 1 ]] && before="with"
+        warn "Only '${TARGET}' is rebuilt: the other agent images keep the previous base"
+        warn "(${before} PrusaSlicer) until 'ai-sandbox --build all'"
+    fi
+}
+
 build_base() {
+    resolve_prusaslicer
     pull_base_image
-    build_image "base" "${DATA_DIR}/base" "localhost/agent-base:latest"
+    if ! build_image "base" "${DATA_DIR}/base" "localhost/agent-base:latest" \
+            --build-arg "WITH_PRUSASLICER=${WITH_PRUSASLICER}"; then
+        if [[ "$WITH_PRUSASLICER" == 1 ]]; then
+            err "The base image failed to build with PrusaSlicer"
+            exit 3
+        fi
+        exit 1
+    fi
 }
 
 build_claude() {
@@ -100,8 +204,6 @@ build_cursor() {
 build_opencode() {
     build_image "opencode" "${DATA_DIR}/opencode" "localhost/agent-opencode:latest"
 }
-
-TARGET="${1:-all}"
 
 case "${TARGET}" in
     base)
@@ -135,7 +237,7 @@ case "${TARGET}" in
         ;;
     *)
         err "Unknown target: ${TARGET}"
-        echo "Usage: ai-sandbox-build [base|claude|codex|cursor|opencode|all]"
+        usage_line
         exit 1
         ;;
 esac

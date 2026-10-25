@@ -6,13 +6,16 @@
 #   ./install.sh              # full install: script + images + BPF (if possible)
 #   ./install.sh --no-build   # install script only, skip image build
 #   ./install.sh --with-web   # install without asking about the web dashboard
+#   ./install.sh --no-prusaslicer  # build the images without PrusaSlicer, without asking
 #   ./install.sh --uninstall  # remove everything installed by this script
 #
 # Install:
 #   1. Checks host prerequisites (podman, pasta, git, cgroups v2, python3)
 #   2. Installs ai-sandbox and ai-sandbox-build to ~/.local/bin/
 #   3. Copies Containerfiles/entrypoints to ~/.local/share/ai-sandbox/
-#   4. Builds container images via ai-sandbox-build (unless --no-build)
+#   4. Builds container images via ai-sandbox-build (unless --no-build),
+#      asking first whether to include PrusaSlicer (default: yes on a first
+#      install, what the current images have on a reinstall)
 #   5. Detects if BPF compilation is possible and builds the loader
 #   6. Installs the web dashboard and its systemd user unit (optional)
 #   7. Checks if ~/.local/bin is in PATH, offers to add it
@@ -48,6 +51,7 @@ info() { echo -e "${CYAN}[INFO]${NC} $*"; }
 DO_BUILD=true
 DO_UNINSTALL=false
 DO_WEB=""          # empty = ask
+DO_PRUSASLICER=""  # empty = ask
 
 for arg in "$@"; do
     case "$arg" in
@@ -55,19 +59,23 @@ for arg in "$@"; do
         --uninstall) DO_UNINSTALL=true ;;
         --with-web)  DO_WEB=true ;;
         --no-web)    DO_WEB=false ;;
+        --with-prusaslicer) DO_PRUSASLICER=true ;;
+        --no-prusaslicer|--without-prusaslicer) DO_PRUSASLICER=false ;;
         -h|--help)
-            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--uninstall]"
+            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--with-prusaslicer|--no-prusaslicer] [--uninstall]"
             echo ""
             echo "  --no-build   Skip container image build"
             echo "  --with-web   Install the web dashboard without asking"
             echo "  --no-web     Skip the web dashboard"
+            echo "  --with-prusaslicer  Include PrusaSlicer in the images without asking"
+            echo "  --no-prusaslicer    Build the images without PrusaSlicer (alias: --without-prusaslicer)"
             echo "  --uninstall  Remove ai-sandbox, BPF loader, images, and config"
             echo "  -h, --help   Show this help"
             exit 0
             ;;
         *)
             err "Unknown option: ${arg}"
-            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--uninstall]"
+            echo "Usage: $0 [--no-build] [--with-web|--no-web] [--with-prusaslicer|--no-prusaslicer] [--uninstall]"
             exit 1
             ;;
     esac
@@ -363,17 +371,72 @@ EOF
 }
 
 # --- Build container images ---------------------------------------------------
+# PrusaSlicer is optional, so a base image that fails to build with it (exit 3
+# from ai-sandbox-build: a dnf mirror error, the package missing for this
+# release) is retried without it rather than leaving no images at all.
 build_images() {
+    local prusa_flag="--without-prusaslicer"
+    [[ "$DO_PRUSASLICER" == true ]] && prusa_flag="--with-prusaslicer"
+
     log "Building container images (this may take a few minutes)..."
     echo ""
-    if "${INSTALL_DIR}/ai-sandbox-build" all; then
+    local rc=0
+    "${INSTALL_DIR}/ai-sandbox-build" "$prusa_flag" all || rc=$?
+    if [[ "$rc" -eq 3 ]]; then
+        echo ""
+        warn "The base image failed to build with PrusaSlicer; building without it"
+        echo ""
+        rc=0
+        "${INSTALL_DIR}/ai-sandbox-build" --without-prusaslicer all || rc=$?
+        # If this fails too, PrusaSlicer was not the cause: the retry hint
+        # below keeps the choice that was asked for.
+        if [[ "$rc" -eq 0 ]]; then
+            DO_PRUSASLICER=false
+            warn "PrusaSlicer is not included; retry later with: ai-sandbox --build --with-prusaslicer all"
+        fi
+    fi
+
+    if [[ "$rc" -eq 0 ]]; then
         echo ""
         log "All container images built successfully"
     else
         echo ""
         err "Image build failed"
-        err "You can retry later with: ai-sandbox --build all"
+        err "You can retry later with: ai-sandbox --build ${prusa_flag} all"
         return 1
+    fi
+}
+
+# The default answer to the PrusaSlicer question: yes on a first install and
+# on images built before the question existed (no label), otherwise what the
+# current base image has, so that pressing Enter on a reinstall keeps it.
+# Prints true or false.
+prusaslicer_default() {
+    local image="localhost/agent-base:latest"
+    local label rc=0
+
+    podman image exists "$image" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) echo true; return ;;
+        *)
+            warn "podman image exists ${image} failed (exit ${rc}); offering yes" >&2
+            echo true
+            return
+            ;;
+    esac
+
+    if ! label=$(podman image inspect \
+            --format '{{index .Config.Labels "ai-sandbox.prusaslicer"}}' "$image"); then
+        warn "Could not read the labels of ${image}; offering yes" >&2
+        echo true
+        return
+    fi
+
+    if [[ "$label" == 0 ]]; then
+        echo false
+    else
+        echo true
     fi
 }
 
@@ -729,12 +792,41 @@ ensure_host_dirs
 echo ""
 
 # 3. Build container images (unless --no-build)
+# PrusaSlicer is asked about here, before the build, because it is part of the
+# base image.  Without a TTY the default applies: unlike the dashboard, nothing
+# is installed on the host, it only makes the images larger.
+if [[ "$DO_BUILD" == true && -z "$DO_PRUSASLICER" ]]; then
+    DO_PRUSASLICER=$(prusaslicer_default)
+    if [[ -t 0 ]]; then
+        prusa_question="  Include PrusaSlicer (headless 3D slicing, adds several hundred MB to every image)?"
+        if [[ "$DO_PRUSASLICER" == true ]]; then
+            echo -en "${prusa_question} [Y/n] "
+            read -r prusa_answer
+            case "$prusa_answer" in
+                [nN]*) DO_PRUSASLICER=false ;;
+            esac
+        else
+            echo -en "${prusa_question} [y/N] "
+            read -r prusa_answer
+            case "$prusa_answer" in
+                [yY]*) DO_PRUSASLICER=true ;;
+            esac
+        fi
+        echo ""
+    fi
+fi
+
 if [[ "$DO_BUILD" == true ]]; then
     build_images
     echo ""
 else
     info "Skipping container image build (--no-build)"
-    info "Run 'ai-sandbox --build all' later to build the images"
+    if [[ "$DO_PRUSASLICER" == true ]]; then
+        info "Run 'ai-sandbox --build --with-prusaslicer all' later to build the images"
+    else
+        info "Run 'ai-sandbox --build all' later to build the images"
+        info "(add --with-prusaslicer to include PrusaSlicer)"
+    fi
     echo ""
 fi
 
@@ -742,7 +834,9 @@ fi
 if can_build_bpf; then
     echo ""
     echo -en "  Build and install the BPF command blocker? [Y/n] "
-    read -r bpf_answer
+    # At EOF (stdin not a terminal, nothing piped) `read` fails, and set -e
+    # would end the install here; take the default instead.
+    read -r bpf_answer || bpf_answer=""
     case "$bpf_answer" in
         [nN]*)
             info "Skipping BPF build"
@@ -799,7 +893,11 @@ if [[ "$DO_BUILD" == true ]]; then
     info "  2. Run:                 ai-sandbox claude ~/my-project"
 else
     info "Next steps:"
-    info "  1. Build container images:  ai-sandbox --build all"
+    if [[ "$DO_PRUSASLICER" == true ]]; then
+        info "  1. Build container images:  ai-sandbox --build --with-prusaslicer all"
+    else
+        info "  1. Build container images:  ai-sandbox --build all"
+    fi
     info "  2. Configure API keys:      vi ~/.config/ai-sandbox/env"
     info "  3. Run:                      ai-sandbox claude ~/my-project"
 fi

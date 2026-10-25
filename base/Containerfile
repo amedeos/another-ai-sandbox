@@ -14,6 +14,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #   --setopt=install_weak_deps=False  skip Recommends/Suggests
 #   --setopt=tsflags=nodocs           skip man pages and documentation
 #   rpm -e --nodeps …                 remove mupdf GUI deps (mesa/llvm/X11) unused by mutool
+#                                     (the optional PrusaSlicer layer below brings them back)
 #   strip --strip-unneeded            remove debug symbols from ELF binaries
 #   rm -rf …/doc,man,info,locale      remove residual documentation
 RUN dnf install -y \
@@ -80,6 +81,31 @@ RUN dnf install -y \
     && rm -rf /var/cache/dnf /usr/share/doc /usr/share/man /usr/share/info /usr/share/locale \
     && find /usr -type f \( -name '*.so*' -o -perm /111 \) -exec strip --strip-unneeded {} + 2>/dev/null || true \
     && rm -rf /usr/lib/.build-id
+
+# Optional PrusaSlicer, for headless slicing (`prusa-slicer --export-gcode`).
+# Off by default; install.sh asks, and `ai-sandbox-build --with-prusaslicer`
+# turns it on.  Even run headless it links against GL, EGL, X11, GTK3,
+# wxWidgets and WebKitGTK, all of them resolved by the dynamic linker at
+# startup -- including the libraries the package layer above removes for
+# mupdf.  That is why it has a layer of its own, after that `rpm -e`: here dnf
+# reinstalls them as dependencies, whereas in the dnf list above the `rpm -e`
+# would strip them again and leave a binary that cannot start.
+# No strip pass in this layer: strip rewrites every file it touches, and
+# touching the files of the layer above would copy them into this one.
+# The label is what `ai-sandbox-build` reads to keep the choice on a rebuild.
+ARG WITH_PRUSASLICER=0
+RUN if [ "${WITH_PRUSASLICER}" = 1 ]; then \
+        dnf install -y \
+            --setopt=install_weak_deps=False \
+            --setopt=tsflags=nodocs \
+            prusa-slicer \
+        && dnf clean all \
+        && rm -rf /var/cache/dnf /var/cache/libdnf5 \
+            /usr/share/doc /usr/share/man /usr/share/info /usr/share/locale \
+            /usr/lib/.build-id; \
+    fi
+
+LABEL ai-sandbox.prusaslicer="${WITH_PRUSASLICER}"
 
 # Non-root user for agent execution
 RUN useradd -m -s /bin/bash agent
