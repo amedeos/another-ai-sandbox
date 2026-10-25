@@ -74,12 +74,16 @@ jobs:
           # is exactly the failure this is here for, and base/zellij.kdl would
           # match regardless. `|| status=$?` because the job shell is `bash -e`,
           # which would otherwise abort before the output could be printed.
+          # A problem `setup --check` itself finds is a `[CONFIG ERROR]` line
+          # with exit 0, so the output is checked as well as the status.
+          # `if … exit 1` rather than `! grep`: under `bash -e` a `!`-negated
+          # command never ends the step, so that check could never fail.
           status=0
           out=$(podman run --rm --entrypoint zellij \
             localhost/agent-base:latest setup --check 2>&1) || status=$?
           echo "$out"
           [ "$status" -eq 0 ]
-          ! grep -qiE 'error|failed to' <<<"$out"
+          if grep -qiE 'error|failed to' <<<"$out"; then exit 1; fi
           podman run --rm --entrypoint grep localhost/agent-base:latest \
             -q 'default_mode "locked"' /etc/zellij/config.kdl
 
