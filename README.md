@@ -90,6 +90,8 @@ The `install.sh` script handles the full setup:
 ./install.sh --no-build   # install the script only, skip container image build
 ./install.sh --with-web   # install the web dashboard without being asked
 ./install.sh --no-web     # skip the web dashboard
+./install.sh --no-prusaslicer    # build the images without PrusaSlicer, without being asked
+./install.sh --with-prusaslicer  # include it without being asked
 ./install.sh --uninstall  # remove everything (binaries, images, config, PATH entry)
 ```
 
@@ -99,7 +101,7 @@ What it does:
 2. **Installs `ai-sandbox` and `ai-sandbox-build`** to `~/.local/bin/`.
 3. **Copies Containerfiles and entrypoints** to `~/.local/share/ai-sandbox/`.
 4. **Creates `~/.config/ai-sandbox/`** and a template `env` file (mode 600) if they don't exist.
-5. **Builds container images** via `ai-sandbox-build all` (skip with `--no-build`).
+5. **Builds container images** via `ai-sandbox-build all` (skip with `--no-build`). It first asks whether to include [PrusaSlicer](#prusaslicer-optional): the default is **yes** on a first install, and on a reinstall whatever the current images have, so pressing Enter keeps it. Without a terminal to ask on, that default is taken. If the base image fails to build with PrusaSlicer, the installer warns and builds it without.
 6. **Builds the BPF loader** if the toolchain and kernel support are detected (clang, bpftool, libbpf, BTF, BPF LSM). This is optional — ai-sandbox works without it.
 7. **Installs the [web UI](#web-ui)** (optional): `ai-sandbox-web`, its browser assets — downloaded once and verified against pinned SHA256 hashes — and a systemd user unit it offers to enable. A failed or mismatched download leaves the dashboard uninstalled with a warning rather than aborting the install.
 8. **Checks PATH** — if `~/.local/bin` is not in your `$PATH`, offers to add it to your shell profile.
@@ -133,7 +135,7 @@ Every container is launched with the following hardening measures:
 ai-sandbox - Starts an AI agent in a sandboxed container
 
 Usage: ai-sandbox <agent> [directory] [--dir path]... [-- extra args]
-       ai-sandbox --build [target]
+       ai-sandbox --build [--with-prusaslicer|--without-prusaslicer] [target]
        ai-sandbox attach|stop <session>
        ai-sandbox list
        ai-sandbox web [options]
@@ -156,6 +158,8 @@ Options:
       --home-size <size>  Size of /home/agent tmpfs (default: 1g)
                           Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)
       --build [target]    Build container images (all|base|claude|codex|cursor|opencode)
+                          --with-prusaslicer / --without-prusaslicer add or drop
+                          PrusaSlicer; without either, the current choice is kept
       --web               Run the agent inside a detachable session, visible to the
                           web dashboard (env: AI_SANDBOX_WEB=1)
       --web-name <name>   Session name for --web (default: <agent>-<dir>-<random>)
@@ -315,13 +319,35 @@ The [web UI](#web-ui) does not change this. It publishes no container port and a
 
 ## Base Image
 
-Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, uv, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip).
+Built on **Fedora 44** and includes: Node.js, npm, Python 3.14 (default), Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, uv, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip). Optionally it also includes [PrusaSlicer](#prusaslicer-optional).
 
 It also carries **zellij** (~44 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
 
 Two `uv` defaults are overridden in the image, both because `/home/agent` is a tmpfs while the project is a bind mount: `UV_LINK_MODE=copy`, since uv's cache and the `.venv` it populates sit on different filesystems and hardlinking would fall back to copying with a warning on every install; and `UV_PYTHON_PREFERENCE=system`, so the image's own Python interpreters stay the first choice over a managed one installed mid-session, which would live in the tmpfs and disappear at exit. Downloading an interpreter remains the fallback for a version that is not in the image.
 
-The image is size-optimised: weak dependencies are skipped (`install_weak_deps=False`), documentation is excluded (`tsflags=nodocs`), mupdf's unused GUI dependencies (mesa, llvm-libs, X11) are removed after install, ELF binaries are stripped, and everything runs in a single layer.
+The image is size-optimised: weak dependencies are skipped (`install_weak_deps=False`), documentation is excluded (`tsflags=nodocs`), mupdf's unused GUI dependencies (mesa, llvm-libs, X11) are removed after install, ELF binaries are stripped, and everything runs in a single layer. A build with PrusaSlicer brings those GUI libraries back, in a layer of its own — see below.
+
+### PrusaSlicer (optional)
+
+[PrusaSlicer](https://www.prusa3d.com/p/prusaslicer/) (Fedora's `prusa-slicer` package) can be included so that an agent can slice models into G-code from the command line. `install.sh` asks (see [Install](#install)); afterwards `ai-sandbox --build --with-prusaslicer` or `--without-prusaslicer` changes the choice, and a plain `ai-sandbox --build` keeps it — it is recorded on the base image as the `ai-sandbox.prusaslicer` label. Change it with `all` as the target: agent images are built on top of the base, so rebuilding a single agent leaves the others on the previous base (`ai-sandbox-build` warns when that happens). It lands in the base image and therefore in every agent image, adding several hundred MB: even headless, the binary links against GL, EGL, X11, GTK3, wxWidgets and WebKitGTK, so those come back too, along with OpenCASCADE, boost and the rest of its dependencies.
+
+Only the command line is usable — there is no display in the container:
+
+```bash
+prusa-slicer --load printer.ini --export-gcode --output part.bgcode part.stl
+```
+
+- **Profiles**: `/home/agent` is a tmpfs, so PrusaSlicer's own configuration directory is gone at the end of each session. Keep the printer/filament/print profile (exported from the GUI on the host as an `.ini`) in the repository and pass it with `--load`, or point `--datadir` at a directory inside the project.
+- **Output format**: Prusa's own printer profiles set `binary_gcode = 1`, so `--export-gcode` writes binary G-code — whatever `--output` is called, hence `.bgcode` above, which is the extension the firmware expects. With `binary_gcode = 0`, or with no profile at all, it writes text G-code: name the file `.gcode`.
+- **No thumbnails**: the command line does not render the preview images that the GUI embeds in G-code.
+- **Memory**: large or complex models may need more than the default `--memory 4g`.
+
+Security notes:
+
+- **A 3MF project is code.** A project file carries its settings, including `post_process` scripts that run when G-code is exported ([CVE-2023-47268](https://nvd.nist.gov/vuln/detail/CVE-2023-47268)). Inside the sandbox such a script runs as the `agent` user, with no more than the agent can already do, and `--block-cmd` rules still apply to it — but treat a downloaded 3MF as you would a downloaded script. The model parsers (STL, OBJ, AMF, 3MF, STEP) are a large C++ surface with a history of memory-safety bugs; the sandbox is what contains them.
+- **G-code drives a physical machine.** Review temperatures and custom start/end G-code written or changed by an agent before printing.
+- **Keep printing out of the sandbox.** Do not give the agent a PrusaLink/OctoPrint API key: with the default network the container can reach your LAN, and so the printer.
+- **Never mount the host's X11 or Wayland socket** to get the GUI working: an X11 client can read keystrokes from, and inject input into, every other window on the display, which is a way out of the sandbox.
 
 ## Notes
 

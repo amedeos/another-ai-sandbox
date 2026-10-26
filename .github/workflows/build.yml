@@ -74,12 +74,16 @@ jobs:
           # is exactly the failure this is here for, and base/zellij.kdl would
           # match regardless. `|| status=$?` because the job shell is `bash -e`,
           # which would otherwise abort before the output could be printed.
+          # A problem `setup --check` itself finds is a `[CONFIG ERROR]` line
+          # with exit 0, so the output is checked as well as the status.
+          # `if … exit 1` rather than `! grep`: under `bash -e` a `!`-negated
+          # command never ends the step, so that check could never fail.
           status=0
           out=$(podman run --rm --entrypoint zellij \
             localhost/agent-base:latest setup --check 2>&1) || status=$?
           echo "$out"
           [ "$status" -eq 0 ]
-          ! grep -qiE 'error|failed to' <<<"$out"
+          if grep -qiE 'error|failed to' <<<"$out"; then exit 1; fi
           podman run --rm --entrypoint grep localhost/agent-base:latest \
             -q 'default_mode "locked"' /etc/zellij/config.kdl
 
@@ -118,6 +122,84 @@ jobs:
             --entrypoint /usr/local/bin/ai-sandbox-supervise \
             localhost/agent-base:latest echo passthrough-ok)
           [[ "$out" == "passthrough-ok" ]]
+
+      # PrusaSlicer is opt-in, so the default build above must not carry it,
+      # and the label ai-sandbox-build reads to keep the choice must say so.
+      # `|| echo absent` rather than `if ! …`: a podman that fails to run at
+      # all must fail the step, not read as "not installed".
+      - name: Smoke test – PrusaSlicer absent by default
+        run: |
+          out=$(podman run --rm --entrypoint sh localhost/agent-base:latest \
+            -c 'command -v prusa-slicer || echo absent')
+          [[ "$out" == "absent" ]]
+          label=$(podman image inspect \
+            --format '{{index .Config.Labels "ai-sandbox.prusaslicer"}}' \
+            localhost/agent-base:latest)
+          [[ "$label" == "0" ]]
+
+      # Same Containerfile, under its own tag so the agent images above stay on
+      # the default build; the package layer comes from the cache.
+      - name: Build base image with PrusaSlicer
+        run: |
+          podman build \
+            --format docker \
+            --build-arg WITH_PRUSASLICER=1 \
+            --tag localhost/agent-base:prusaslicer \
+            --file base/Containerfile \
+            base/
+          label=$(podman image inspect \
+            --format '{{index .Config.Labels "ai-sandbox.prusaslicer"}}' \
+            localhost/agent-base:prusaslicer)
+          [[ "$label" == "1" ]]
+
+      # A real slice, not --help: the package layer removes GL/X11 libraries
+      # PrusaSlicer links against, and only running it shows that its own layer
+      # brought them back.  Run with the hardening, limits and tmpfs mounts of
+      # an ai-sandbox session (its defaults: 4g, 512 pids, 1g /tmp and
+      # /home/agent), with no network and no display, which is how an agent
+      # will run it.  The cube is generated here and fed on stdin, so nothing
+      # is bind-mounted.  The default config writes text G-code; a real Prusa
+      # profile (binary_gcode = 1) would write .bgcode instead.
+      - name: Smoke test – PrusaSlicer headless slice
+        run: |
+          python3 -I - "$RUNNER_TEMP/cube.stl" <<'EOF'
+          import sys
+          s = 20.0
+          out = ["solid cube"]
+          for a in range(3):
+              b, c = (a + 1) % 3, (a + 2) % 3
+              for d in (0.0, s):
+                  quad = []
+                  for u, w in ((0, 0), (s, 0), (s, s), (0, s)):
+                      p = [0.0] * 3
+                      p[a], p[b], p[c] = d, u, w
+                      quad.append(p)
+                  if d == 0.0:
+                      quad.reverse()
+                  for tri in ((quad[0], quad[1], quad[2]), (quad[0], quad[2], quad[3])):
+                      out += ["facet normal 0 0 0", " outer loop"]
+                      out += ["  vertex %g %g %g" % tuple(p) for p in tri]
+                      out += [" endloop", "endfacet"]
+          out.append("endsolid cube")
+          with open(sys.argv[1], "w") as f:
+              f.write("\n".join(out) + "\n")
+          EOF
+          status=0
+          out=$(podman run --rm -i \
+            --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --memory=4g --pids-limit=512 \
+            --tmpfs /tmp:rw,size=1g \
+            --mount type=tmpfs,destination=/home/agent,tmpfs-size=1g,tmpfs-mode=0755,U=true \
+            --network=none --user 1000:1000 \
+            --entrypoint bash localhost/agent-base:prusaslicer -c '
+              set -euo pipefail
+              cat > /tmp/cube.stl
+              prusa-slicer --export-gcode --output /tmp/cube.gcode /tmp/cube.stl
+              moves=$(grep -c "^G1 " /tmp/cube.gcode)
+              echo "G1 moves: ${moves}"
+            ' < "$RUNNER_TEMP/cube.stl" 2>&1) || status=$?
+          echo "$out"
+          [ "$status" -eq 0 ]
 
       - name: Smoke test – claude
         run: podman run --rm localhost/agent-claude:latest --version

@@ -11,6 +11,8 @@ Rootless Podman containers for running AI coding agents (Claude Code, Claude Cod
 **Build container images (requires Podman):**
 ```bash
 podman build --format docker --tag localhost/agent-base:latest --file base/Containerfile base/
+# or, instead of the line above, with the optional PrusaSlicer layer (off by default; install.sh asks)
+podman build --format docker --build-arg WITH_PRUSASLICER=1 --tag localhost/agent-base:latest --file base/Containerfile base/
 podman build --format docker --tag localhost/agent-claude:latest --file claude-code/Containerfile claude-code/
 podman build --format docker --tag localhost/agent-codex:latest --file codex/Containerfile codex/
 podman build --format docker --tag localhost/agent-cursor:latest --file cursor-agent/Containerfile cursor-agent/
@@ -51,7 +53,7 @@ There are three main Bash scripts, one Python script, and a BPF subsystem:
 
 - **`ai-sandbox`** — the user-facing wrapper. Parses arguments, validates auth/images, constructs a `podman run` command with all security flags, and optionally starts the BPF loader for `--block-cmd` rules. Three execution modes: normal (`exec podman run`), BPF-blocking (starts the container in the background, resolves its cgroup, launches the loader, then `podman attach`), and web (`--web`: starts detached with `--rm`, then attaches with `podman exec ... zellij attach`, so detaching does not kill the agent). Also dispatches the `attach`/`list`/`stop`/`web` subcommands.
 
-- **`ai-sandbox-build`** — standalone build script. Reads Containerfiles from `~/.local/share/ai-sandbox/` (installed by `install.sh`). Builds base first, then agent images on top.
+- **`ai-sandbox-build`** — standalone build script. Reads Containerfiles from `~/.local/share/ai-sandbox/` (installed by `install.sh`). Builds base first, then agent images on top. `--with-prusaslicer`/`--without-prusaslicer` set the base image's `WITH_PRUSASLICER` build arg; without either, the existing base image's `ai-sandbox.prusaslicer` label is kept.
 
 - **`install.sh`** — installer/uninstaller. Checks prerequisites, copies scripts and Containerfiles, creates config dirs, builds images, optionally builds BPF loader, handles PATH setup. `--uninstall` reverses everything interactively.
 
@@ -66,8 +68,8 @@ There are three main Bash scripts, one Python script, and a BPF subsystem:
 ## CI
 
 Two GitHub Actions workflows on push/PR to `main`:
-- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` (it is Python and must stay out of the ShellCheck sweep); Hadolint on all Containerfiles
-- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` and `uv --version` in the base image, and `ai-sandbox-supervise` passthrough)
+- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `ai-sandbox-build` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` (it is Python and must stay out of the ShellCheck sweep); Hadolint on all Containerfiles
+- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` and `uv --version` in the base image, and `ai-sandbox-supervise` passthrough); also builds the base a second time with `WITH_PRUSASLICER=1` and slices a cube in it headless, and checks that the default build has no PrusaSlicer
 
 ## Git Policy
 
@@ -82,6 +84,7 @@ Do NOT create commits automatically. All commits must be reviewed and approved b
 - Host directories that must persist are bind-mounted **outside** `/home/agent` (e.g. `opencode/` uses `/state`) and symlinked into place by the entrypoint. Mounting them directly under `/home/agent` makes podman create the parent directories as container root, which the `agent` user cannot write into.
 - The `agent` user (UID 1000) runs inside containers. `--userns=keep-id:uid=1000,gid=1000` maps host UID to container UID 1000.
 - When adding or removing packages in `base/Containerfile`, always update the package list in the **Base Image** section of `README.md` to match.
+- PrusaSlicer is opt-in (`ARG WITH_PRUSASLICER`, default 0; `install.sh` asks — yes on a first install, the current image's label on a reinstall — and retries without it when `ai-sandbox-build` exits 3) and has a layer of its own **after** the package layer. Keep it there: even headless it links GL/EGL/X11/GTK3/wx/WebKitGTK, which the package layer's `rpm -e --nodeps` strips for mupdf — added to that `dnf install` list instead, the build would succeed and the binary would not start. Do not run `strip` in that layer either: strip rewrites every file it touches, copying the package layer's files into the new one. The `ai-sandbox.prusaslicer` label is what `ai-sandbox-build` reads to keep the choice across rebuilds, and CI proves the layer with a real headless slice, not `--help`.
 - Binaries downloaded into an image, and browser assets downloaded by `install.sh`, are pinned by version **and** verified against a pinned SHA256. Do not add an unverified download.
 - Podman labels live under the `ai-sandbox.*` namespace. Any operation on a caller-supplied session name must re-verify `ai-sandbox.web=1` on the container itself (`resolve_web_container` in `ai-sandbox`, `resolve_container` in `ai-sandbox-web`) rather than trusting a listing — that is what makes non-`--web` sessions invisible rather than merely refused.
 - **No container port is ever published.** The web layer reaches containers only through `podman exec`; `README.md` records the decision to keep host↔container network plumbing out of scope, and `test/test_webui.sh` enforces it.

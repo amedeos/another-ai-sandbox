@@ -20,7 +20,7 @@ jobs:
           for f in **/*.sh **/*.bash; do
             files+=("$f")
           done
-          for f in ai-sandbox base/ai-sandbox-supervise; do
+          for f in ai-sandbox ai-sandbox-build base/ai-sandbox-supervise; do
             [[ -f "$f" ]] && files+=("$f")
           done
           if [[ ${#files[@]} -gt 0 ]]; then

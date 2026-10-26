@@ -8,7 +8,7 @@
 #   ai-sandbox codex         [directory] [--dir path]... [-- extra args]
 #   ai-sandbox cursor        [directory] [--dir path]... [-- extra args]
 #   ai-sandbox opencode [directory] [--dir path]... [-- extra args]
-#   ai-sandbox --build [all|base|claude|codex|cursor|opencode]
+#   ai-sandbox --build [--with-prusaslicer|--without-prusaslicer] [all|base|claude|codex|cursor|opencode]
 #
 # Examples:
 #   ai-sandbox claude ~/projects/my-repo
@@ -20,6 +20,7 @@
 #   ai-sandbox claude                       # uses current directory
 #   ai-sandbox --build claude               # rebuild claude image
 #   ai-sandbox --build                      # rebuild all images
+#   ai-sandbox --build --with-prusaslicer   # rebuild all, adding PrusaSlicer
 #
 # Multiple repositories in one sandbox (--dir is repeatable):
 #   ai-sandbox claude ~/projects/api --dir ~/projects/web --dir ~/projects/shared
@@ -455,7 +456,7 @@ usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
     echo "Usage: ai-sandbox <agent> [directory] [--dir path]... [-- extra args]"
-    echo "       ai-sandbox --build [target]"
+    echo "       ai-sandbox --build [--with-prusaslicer|--without-prusaslicer] [target]"
     echo "       ai-sandbox attach|stop <session>"
     echo "       ai-sandbox list"
     echo "       ai-sandbox web [options]"
@@ -478,6 +479,8 @@ usage() {
     echo "      --home-size <size>  Size of /home/agent tmpfs (default: ${TMPFS_HOME_SIZE})"
     echo "                          Units: b (bytes), k (kilobytes), m (megabytes), g (gigabytes)"
     echo "      --build [target]    Build container images (all|base|claude|codex|cursor|opencode)"
+    echo "                          --with-prusaslicer / --without-prusaslicer add or drop"
+    echo "                          PrusaSlicer; without either, the current choice is kept"
     echo "      --web               Run the agent inside a detachable session, visible to the"
     echo "                          web dashboard (env: AI_SANDBOX_WEB=1)"
     echo "      --web-name <name>   Session name for --web (default: <agent>-<dir>-<random>)"
