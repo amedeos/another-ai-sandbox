@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""ai-sandbox-login-relay -- completes Codex's browser sign-in for a sandbox.
+
+`codex login` waits for the OAuth redirect on 127.0.0.1:1455 *inside* the
+container, while the browser that follows the redirect runs on the host.  No
+container port is ever published (README "Security Model"), so for the length
+of one sign-in this relay listens on the host's 127.0.0.1:1455 and hands each
+callback to the container the way the rest of ai-sandbox reaches a container:
+through `podman exec`, here running curl against the container's own loopback.
+
+    ai-sandbox-login-relay --container NAME -- podman run ... IMAGE login
+
+The port is bound first, then the command after `--` (the sign-in container,
+in the foreground on this terminal) is run, and its exit status is returned
+once it ends.  When the port is taken, nothing is started: the relay says so
+on stderr and exits 3, a status the command itself may also return.
+
+Standard library only, like ai-sandbox-web: the project installs no runtime
+dependencies.
+"""
+
+import http.server
+import re
+import signal
+import subprocess
+import sys
+import threading
+
+PORT = 1455
+
+# The two paths of Codex's login server that answer the browser
+# (codex-rs/login/src/server.rs): /auth/callback exchanges the code and
+# redirects to /success, which ends the sign-in.  Its third path, /cancel, is
+# how another `codex login` takes the port over and is not this relay's to
+# forward.  The query is limited to URL characters that need no quoting in a
+# curl config line: no quotes, backslashes, whitespace or '#'.
+FORWARDED = re.compile(
+    r"^/(?:auth/callback|success)(?:\?[A-Za-z0-9._~%&=+:/,;!*'()@$-]*)?$"
+)
+
+# Passed back to the browser; Content-Length is recomputed for the body as
+# curl delivered it, and everything else is the container server's business.
+PASSED_HEADERS = {"content-type", "location", "cache-control"}
+
+EXIT_PORT_TAKEN = 3
+
+
+def parse_response(raw):
+    """Split curl --include output into (status, headers, body)."""
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        raise ValueError("no HTTP header block in the response")
+    lines = head.decode("iso-8859-1").split("\r\n")
+    match = re.match(r"HTTP/\S+ (\d{3})", lines[0])
+    if not match:
+        raise ValueError(f"unexpected status line {lines[0]!r}")
+    headers = []
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if colon:
+            headers.append((name.strip(), value.strip()))
+    return int(match.group(1)), headers, body
+
+
+class Server(http.server.ThreadingHTTPServer):
+    # Never SO_REUSEPORT: a second relay (or anything else) must fail to bind
+    # rather than share the port and receive half of the callbacks.  Set here
+    # because the default has not been the same in every Python release.
+    allow_reuse_port = False
+
+
+class Relay(http.server.BaseHTTPRequestHandler):
+    server_version = "ai-sandbox-login-relay"
+    podman = "podman"
+    container = ""
+
+    def do_GET(self):
+        if not FORWARDED.match(self.path):
+            self.send_error(404)
+            return
+        # The URL reaches curl on stdin, not on its command line, so the
+        # authorization code never shows up in a process listing.
+        config = f'url = "http://127.0.0.1:{PORT}{self.path}"\n'
+        # Judged by what curl printed, not by podman's status: /success is
+        # Codex's last answer, after which the sign-in container exits and is
+        # removed, and podman exec can fail on the way out of a request that
+        # curl had already completed.
+        try:
+            result = subprocess.run(
+                [
+                    self.podman, "exec", "-i", self.container,
+                    "curl", "--silent", "--show-error", "--include",
+                    "--globoff", "--max-time", "60", "--config", "-",
+                ],
+                input=config.encode(),
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as err:
+            self.fail(f"could not reach the sign-in container: {err}")
+            return
+        try:
+            status, headers, body = parse_response(result.stdout)
+        except ValueError as err:
+            message = result.stderr.decode(errors="replace").strip()
+            if result.returncode != 0:
+                self.fail(message or f"podman exec exited {result.returncode}")
+            else:
+                self.fail(f"unreadable answer from the sign-in container: {err}")
+            return
+
+        self.send_response(status)
+        for name, value in headers:
+            if name.lower() in PASSED_HEADERS:
+                self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def fail(self, message):
+        sys.stderr.write(f"ai-sandbox-login-relay: {message}\r\n")
+        self.send_error(502, explain=message)
+
+    def log_message(self, fmt, *args):
+        # The default access log would print every request line, and with it
+        # the authorization code, onto the terminal of the sign-in.
+        pass
+
+
+def main(argv):
+    if len(argv) < 4 or argv[0] != "--container" or argv[2] != "--":
+        sys.stderr.write(
+            "usage: ai-sandbox-login-relay --container NAME -- COMMAND...\n"
+        )
+        return 2
+    Relay.container = argv[1]
+    command = argv[3:]
+    Relay.podman = command[0]
+
+    try:
+        server = Server(("127.0.0.1", PORT), Relay)
+    except OSError as err:
+        sys.stderr.write(
+            f"ai-sandbox-login-relay: cannot listen on 127.0.0.1:{PORT}: "
+            f"{err.strerror or err}\n"
+        )
+        return EXIT_PORT_TAKEN
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    # podman owns the terminal from here and gets Ctrl-C as a keystroke; a
+    # SIGINT that still reaches this process must not end it with a traceback
+    # while the sign-in runs.  A handler rather than SIG_IGN, which the child
+    # would inherit across exec.
+    signal.signal(signal.SIGINT, lambda signum, frame: None)
+    try:
+        status = subprocess.call(command)
+    finally:
+        server.shutdown()
+        server.server_close()
+    return status if status >= 0 else 128 - status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

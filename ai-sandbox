@@ -14,6 +14,7 @@
 #   ai-sandbox claude ~/projects/my-repo
 #   ai-sandbox claude-vertex ~/projects/my-repo
 #   ai-sandbox codex  .
+#   ai-sandbox codex --login                # sign in to ChatGPT again (the first run does it)
 #   ai-sandbox cursor ~/projects/other -- chat "find bugs"
 #   ai-sandbox opencode ~/projects/my-repo
 #   ai-sandbox opencode . --model kimi-k2.6
@@ -452,6 +453,62 @@ do_stop() {
     echo -e "${GREEN}Stopped${NC} ${target}"
 }
 
+# Codex's ChatGPT sign-in sends the browser to http://127.0.0.1:1455/auth/callback,
+# where `codex login` listens -- inside the container, while the browser is on
+# the host's loopback, and no container port is ever published. So the sign-in
+# runs under ai-sandbox-login-relay, which listens on the host's 127.0.0.1:1455
+# for as long as it lasts and hands each callback to the container through
+# `podman exec`. It is a throwaway container of its own: the sandbox's flags,
+# the network, and the Codex home, but no repository and none of the session's
+# environment, which a sign-in has no use for.
+codex_login() {
+    local relay="${AI_SANDBOX_LOGIN_RELAY:-${HOME}/.local/bin/ai-sandbox-login-relay}"
+    local name="sandbox-codex-login-$$" rc=0 before after
+    local -a cmd=(
+        "${BUILDER}" run --rm -it
+        --name "$name"
+        "${SANDBOX_FLAGS[@]}"
+        "${NETWORK_FLAGS[@]}"
+    )
+    if [[ "$CPU_LIMIT_APPLIED" == true ]]; then
+        cmd+=(--cpus="${MAX_CPUS}")
+    fi
+    # :z as for the session's own mount of the Codex home, which may be running
+    # while this signs in again.
+    cmd+=(-v "${CODEX_SANDBOX_HOME}:/home/agent/.codex:z" "${IMAGE}" login)
+
+    if [[ ! -x "$relay" ]]; then
+        echo -e "${RED}Error: ai-sandbox-login-relay not found at ${relay}${NC}" >&2
+        echo "Run install.sh, or set AI_SANDBOX_LOGIN_RELAY=/path/to/ai-sandbox-login-relay" >&2
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${RED}Error: the Codex sign-in needs python3 on the host (for ai-sandbox-login-relay).${NC}" >&2
+        return 1
+    fi
+
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "${CYAN}Sign-in command:${NC}"
+        printf '  %s \\\n' "$relay" --container "$name" -- "${cmd[@]}"
+        echo ""
+    fi
+    echo -e "${GREEN}Signing in to Codex${NC} with ChatGPT, in the browser"
+    echo "  Open the link below and approve. The browser then comes back to 127.0.0.1:1455,"
+    echo "  which ai-sandbox hands on to the sign-in container."
+    echo ""
+
+    # A repeat sign-in finds the old auth.json in place, so success means a
+    # different one: rewritten (timestamp) or replaced (inode).
+    before="$(stat -c '%y %i' "${CODEX_SANDBOX_HOME}/auth.json" 2>/dev/null || true)"
+    "$relay" --container "$name" -- "${cmd[@]}" || rc=$?
+    after="$(stat -c '%y %i' "${CODEX_SANDBOX_HOME}/auth.json" 2>/dev/null || true)"
+    if [[ $rc -eq 0 && ( -z "$after" || "$after" == "$before" ) ]]; then
+        echo -e "${RED}Error: the sign-in ended without saving a login.${NC}" >&2
+        rc=1
+    fi
+    return "$rc"
+}
+
 usage() {
     echo -e "${CYAN}ai-sandbox${NC} - Starts an AI agent in a sandboxed container"
     echo ""
@@ -500,6 +557,10 @@ usage() {
     echo "      --model <name>      Model to use (default: ${OPENCODE_MODEL_DEFAULT}, env: AI_SANDBOX_OPENCODE_MODEL)"
     echo "      --base-url <url>    API endpoint (default: ${OPENCODE_BASE_URL_DEFAULT}, env: AI_SANDBOX_OPENCODE_BASE_URL)"
     echo "      --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)"
+    echo ""
+    echo "Options for codex:"
+    echo "      --login             Sign in with ChatGPT in the browser, then exit. Done"
+    echo "                          automatically when the sandbox has no login yet"
     exit 0
 }
 
@@ -552,6 +613,7 @@ BLOCK_CMDS=()
 OPT_MODEL=""
 OPT_BASE_URL=""
 OPT_NO_API_KEY=false
+OPT_LOGIN=false
 OPT_CPUS=""
 OPT_MEMORY=""
 OPT_WEB=""
@@ -584,6 +646,7 @@ while [[ $# -gt 0 ]]; do
         --model)      OPT_MODEL="$2"; shift 2 ;;
         --base-url)   OPT_BASE_URL="$2"; shift 2 ;;
         --no-api-key) OPT_NO_API_KEY=true; shift ;;
+        --login)      OPT_LOGIN=true; shift ;;
         --web)        OPT_WEB=1; shift ;;
         --web-name)   OPT_WEB_NAME="$2"; shift 2 ;;
         --web-size)   OPT_WEB_SIZE="$2"; shift 2 ;;
@@ -616,10 +679,21 @@ if [[ ! -t 0 ]]; then
     NON_INTERACTIVE=true
 fi
 
+# Counted before the configured rules join them: --login refuses only the
+# ones given on this command line.
+CLI_BLOCK_CMDS=${#BLOCK_CMDS[@]}
 if [[ -n "$BLOCKED_COMMANDS" ]]; then
     for bc in $BLOCKED_COMMANDS; do
         BLOCK_CMDS+=("$bc")
     done
+fi
+
+# `codex login` on its own is the browser sign-in, which cannot complete from
+# inside a session container: give it the one that can (codex_login). With
+# options (--device-auth, --with-api-key, status) it is left to Codex.
+if [[ "$AGENT" == "codex" && ${#EXTRA_ARGS[@]} -eq 1 && "${EXTRA_ARGS[0]}" == "login" ]]; then
+    OPT_LOGIN=true
+    EXTRA_ARGS=()
 fi
 
 # --- Resolve the directories to mount -----------------------------------------
@@ -733,6 +807,30 @@ if [[ "$AGENT" != "opencode" ]]; then
     fi
 fi
 
+# --login signs in and exits: there is no session for agent arguments, --web
+# or --block-cmd to apply to, and the sign-in needs a terminal and the network.
+if [[ "$OPT_LOGIN" == true ]]; then
+    login_error=""
+    if [[ "$AGENT" != "codex" ]]; then
+        login_error="--login is only supported for the codex agent."
+    elif [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        login_error="--login takes no arguments for the agent."
+    elif [[ -n "$OPT_WEB" || $CLI_BLOCK_CMDS -gt 0 ]]; then
+        login_error="--login cannot be combined with --web or --block-cmd."
+    elif [[ "$NETWORK_OFF" == true ]]; then
+        login_error="--login needs the network; drop --network-off."
+    elif [[ "$NON_INTERACTIVE" == true ]]; then
+        login_error="--login needs a terminal to sign in from."
+    fi
+    if [[ -n "$login_error" ]]; then
+        echo -e "${RED}Error: ${login_error}${NC}" >&2
+        exit 1
+    fi
+    # Rules from the script's own BLOCKED_COMMANDS would only ask for sudo:
+    # the sign-in container never gets the BPF blocker.
+    BLOCK_CMDS=()
+fi
+
 # Load env file if it exists
 if [[ -f "$ENV_FILE" ]]; then
     set -a
@@ -752,8 +850,10 @@ validate_size "$MAX_MEM"
 
 # --- Resolve web mode ---------------------------------------------------------
 # Same precedence as the resource limits above, and for the same reason.
+# --login starts no session, so an AI_SANDBOX_WEB=1 in the env file does not
+# apply to it.
 WEB_MODE=false
-if [[ "${OPT_WEB:-${AI_SANDBOX_WEB:-0}}" == "1" ]]; then
+if [[ "${OPT_WEB:-${AI_SANDBOX_WEB:-0}}" == "1" && "$OPT_LOGIN" != true ]]; then
     WEB_MODE=true
 fi
 
@@ -826,6 +926,35 @@ if [[ "$AGENT" == "opencode" ]]; then
     fi
 fi
 
+# Codex's ChatGPT sign-in cannot complete from inside the container on its own
+# (see codex_login), so ai-sandbox runs it: on --login, and before a plain
+# interactive session that has neither an API key nor a login yet. Not when
+# agent arguments are given -- `-- login --device-auth` is a sign-in of its own,
+# and `-- exec ...` should not turn into a browser round-trip unasked -- and
+# not without a terminal or a network to sign in with.
+# A sandbox config.toml whose top level selects another model provider (a
+# local Ollama, a gateway with a key of its own) needs no ChatGPT login at all.
+CODEX_SIGN_IN=false
+CODEX_PROVIDER=""
+if [[ "$AGENT" == "codex" ]]; then
+    if [[ -f "${CODEX_SANDBOX_HOME}/config.toml" ]]; then
+        CODEX_PROVIDER="$(awk '
+            /^[[:space:]]*\[/ { exit }
+            /^[[:space:]]*model_provider[[:space:]]*=/ {
+                sub(/^[^=]*=/, ""); sub(/#.*/, ""); gsub(/["\047[:space:]]/, "")
+                print; exit
+            }' "${CODEX_SANDBOX_HOME}/config.toml" 2>/dev/null || true)"
+        [[ "$CODEX_PROVIDER" == "openai" ]] && CODEX_PROVIDER=""
+    fi
+    if [[ "$OPT_LOGIN" == true ]]; then
+        CODEX_SIGN_IN=true
+    elif [[ -z "${OPENAI_API_KEY:-}" && ! -f "${CODEX_SANDBOX_HOME}/auth.json" \
+            && -z "$CODEX_PROVIDER" && ${#EXTRA_ARGS[@]} -eq 0 \
+            && "$NON_INTERACTIVE" == false && "$NETWORK_OFF" == false ]]; then
+        CODEX_SIGN_IN=true
+    fi
+fi
+
 # Verify authentication is available
 if [[ "$AGENT" == "claude-vertex" ]]; then
     # Vertex AI requires GCP credentials and three env vars
@@ -856,16 +985,27 @@ elif [[ -n "$API_KEY_VAR" && -z "${!API_KEY_VAR:-}" ]]; then
         echo -e "${CYAN}Using OAuth session from ~/.claude${NC}"
     elif [[ "$AGENT" == "codex" ]]; then
         # The sandbox's Codex home is always mounted (created below if
-        # missing), so a sign-in done inside the sandbox persists: nothing to
-        # confirm, only to say how. The directory alone proves nothing, since it
-        # is created empty.
-        if [[ -f "${CODEX_SANDBOX_HOME}/auth.json" ]]; then
+        # missing), so a sign-in persists: nothing to confirm, only to say how.
+        # The directory alone proves nothing, since it is created empty.
+        if [[ "$OPT_LOGIN" == true || "${EXTRA_ARGS[0]:-}" == "login" ]]; then
+            :   # this run is the sign-in
+        elif [[ -f "${CODEX_SANDBOX_HOME}/auth.json" ]]; then
             echo -e "${CYAN}Using cached login from ~/.config/ai-sandbox/codex${NC}"
-        elif [[ "${EXTRA_ARGS[0]:-}" != "login" ]]; then
-            # Not when this run is the sign-in the hint below points to.
-            echo -e "${YELLOW}No ${API_KEY_VAR} and no login in ~/.config/ai-sandbox/codex: Codex will ask you to sign in.${NC}"
-            echo "Its browser sign-in cannot reach the sandbox on its own; see 'Codex' in the"
-            echo "README, or sign in with: ai-sandbox codex . -- login --device-auth"
+        elif [[ -n "$CODEX_PROVIDER" ]]; then
+            echo -e "${CYAN}Using model provider '${CODEX_PROVIDER}' from ~/.config/ai-sandbox/codex/config.toml${NC}"
+        elif [[ "$CODEX_SIGN_IN" == true ]]; then
+            echo -e "${CYAN}No login in ~/.config/ai-sandbox/codex yet: signing in first.${NC}"
+        else
+            echo -e "${YELLOW}No ${API_KEY_VAR} and no login in ~/.config/ai-sandbox/codex.${NC}"
+            echo "Codex's own sign-in screen cannot complete the browser sign-in from inside"
+            echo "the sandbox; sign in from a terminal first with: ai-sandbox codex --login"
+            # Without a terminal (the web dashboard) the session would only sit
+            # at that screen. Same wording as the generic refusal below, which
+            # test/test_webui.sh recognises.
+            if [[ "$NON_INTERACTIVE" == true ]]; then
+                echo -e "${RED}Error: ${API_KEY_VAR} not set and running non-interactively.${NC}" >&2
+                exit 1
+            fi
         fi
     elif [[ "$AGENT" == "cursor" && -d "${HOME}/.config/cursor" ]]; then
         echo -e "${CYAN}Using config from ~/.config/cursor/${NC}"
@@ -957,10 +1097,9 @@ else
     CONTAINER_NAME="sandbox-${AGENT}-$$"
 fi
 
-CMD=(
-    "${BUILDER}" run --rm -it
-    --name "${CONTAINER_NAME}"
-
+# What makes a container a sandbox, shared by the session and by codex_login's
+# throwaway sign-in container so that the two cannot drift apart.
+SANDBOX_FLAGS=(
     # === ISOLATION ===
     "--userns=keep-id:uid=1000,gid=1000"     # Map host user to agent (UID 1000) inside container
     --cap-drop=ALL                          # Remove all Linux capabilities
@@ -973,17 +1112,28 @@ CMD=(
 
     # === FILESYSTEM ===
     # Container is read-only, except:
-    #   - /workspace/<name>: one bind mount (rw) per requested directory
+    #   - /workspace/<name>: one bind mount (rw) per requested directory (added in CMD)
     #   - /tmp: tmpfs for temporary files
     #   - /home/agent: tmpfs for agent config/cache (mode=0755 for bind mounts)
     --read-only
-    "${VOLUME_FLAGS[@]}"
     --tmpfs "/tmp:rw,size=${TMPFS_TMP_SIZE}"
     --mount "type=tmpfs,destination=/home/agent,tmpfs-size=${TMPFS_HOME_SIZE},tmpfs-mode=0755,U=true"
-    -w "${CONTAINER_WORKDIR}"
+)
 
-    # === NETWORK ===
-    # slirp4netns: userspace network stack, isolated from host
+# === NETWORK ===
+# pasta (or slirp4netns): userspace network stack, isolated from host
+if [[ "$NETWORK_OFF" == true ]]; then
+    NETWORK_FLAGS=(--network=none)
+else
+    NETWORK_FLAGS=(--network="${NETWORK_MODE}" --dns="${DNS}")
+fi
+
+CMD=(
+    "${BUILDER}" run --rm -it
+    --name "${CONTAINER_NAME}"
+    "${SANDBOX_FLAGS[@]}"
+    "${VOLUME_FLAGS[@]}"
+    -w "${CONTAINER_WORKDIR}"
 )
 
 # === CPU QUOTA ===
@@ -996,11 +1146,7 @@ elif [[ -n "$OPT_CPUS" || -n "${AI_SANDBOX_CPUS:-}" ]]; then
     echo -e "${YELLOW}         --cpus=${MAX_CPUS} ignored; the container can use all host CPUs.${NC}" >&2
 fi
 
-if [[ "$NETWORK_OFF" == true ]]; then
-    CMD+=(--network=none)
-else
-    CMD+=(--network="${NETWORK_MODE}" --dns="${DNS}")
-fi
+CMD+=("${NETWORK_FLAGS[@]}")
 
 # === API KEY / ENV FILE ===
 if [[ "$AGENT" == "claude-vertex" ]]; then
@@ -1076,7 +1222,10 @@ if [[ "$AGENT" == "codex" ]]; then
         install -d -m 0700 "$CODEX_SANDBOX_HOME"
     fi
     chmod 0700 "$CODEX_SANDBOX_HOME"
-    CMD+=(-v "${CODEX_SANDBOX_HOME}:/home/agent/.codex:Z")
+    # :z, not :Z: a private label is per container, so `ai-sandbox codex
+    # --login`, or a second session, would relabel the directory away from a
+    # session already running. No other container mounts it either way.
+    CMD+=(-v "${CODEX_SANDBOX_HOME}:/home/agent/.codex:z")
 fi
 
 # === OPENCODE STATE: persist sessions and the provider package cache ===
@@ -1143,6 +1292,35 @@ fi
 CMD+=("${IMAGE}")
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
     CMD+=("${EXTRA_ARGS[@]}")
+fi
+
+# --- Codex sign-in ------------------------------------------------------------
+# Before the session, so that it starts signed in (see CODEX_SIGN_IN above).
+if [[ "$CODEX_SIGN_IN" == true ]]; then
+    if codex_login; then
+        echo ""
+        echo -e "${GREEN}Signed in.${NC} The login is kept in ~/.config/ai-sandbox/codex."
+        if [[ "$OPT_LOGIN" == true ]]; then
+            exit 0
+        fi
+    else
+        echo "" >&2
+        echo -e "${RED}Codex sign-in did not complete.${NC} Retry with: ai-sandbox codex --login" >&2
+        if [[ "$OPT_LOGIN" == true ]]; then
+            exit 1
+        fi
+        # Only a convenience before the session: without it Codex would ask
+        # to sign in itself, as it did before ai-sandbox signed in for it.
+        read -rp "Start the session without signing in? [y/N] " confirm
+        [[ "$confirm" =~ ^[yY]$ ]] || exit 1
+    fi
+    # The sign-in can outlast sudo's cached credentials, which the BPF loader
+    # still needs; renewed here, while there is a terminal to ask at.
+    if [[ ${#BLOCK_CMDS[@]} -gt 0 ]] && ! sudo -n true 2>/dev/null && ! sudo -v; then
+        echo -e "${RED}Error: sudo access required for BPF command blocking.${NC}" >&2
+        exit 1
+    fi
+    echo ""
 fi
 
 # --- Execution ----------------------------------------------------------------

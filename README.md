@@ -20,7 +20,8 @@ ai-sandbox/
 ├── claude-code/
 │   └── Containerfile          # Claude Code (native installer + npm fallback)
 ├── codex/
-│   └── Containerfile          # OpenAI Codex CLI
+│   ├── Containerfile          # OpenAI Codex CLI
+│   └── entrypoint.sh          # Runs Codex without its daemon and with the container as its sandbox
 ├── cursor-agent/
 │   ├── Containerfile          # Cursor Agent CLI (installed to /opt to survive tmpfs)
 │   └── entrypoint.sh          # Prepares tmpfs home, then hands off to the supervisor
@@ -34,10 +35,12 @@ ai-sandbox/
 │   └── static/                # Dashboard UI and browser terminal
 ├── test/
 │   ├── test_bpf_blocker.sh   # End-to-end tests for BPF command blocker
+│   ├── test_login_relay.sh   # Codex sign-in relay against a fake podman (no images needed)
 │   └── test_webui.sh         # End-to-end tests for the web UI (no root needed)
 ├── install.sh                 # Installer (and uninstaller) script
 ├── ai-sandbox                 # Wrapper to start agents
 ├── ai-sandbox-build           # Build script for container images
+├── ai-sandbox-login-relay     # Codex sign-in: hands the browser's callback to the container (Python 3)
 ├── LICENSE                    # GPLv3
 └── README.md
 ```
@@ -126,6 +129,7 @@ Every container is launched with the following hardening measures:
 | Bind mount only `/workspace/<name>` | Agent sees ONLY the directories you passed in               |
 | BPF LSM command blocker       | Blocks specific commands (e.g. git push) inside the container via eBPF |
 | No published ports            | The web UI never publishes a container port; it reaches sessions via `podman exec` |
+| Codex sign-in relay           | Only while a Codex sign-in runs, `ai-sandbox-login-relay` listens on the host's `127.0.0.1:1455` and hands the browser's OAuth callback to the sign-in container via `podman exec` |
 | Web sessions are opt-in        | Only containers started with `--web` are labelled and visible to the dashboard |
 | Dashboard binds `127.0.0.1`    | Loopback only, behind a 256-bit bearer token in a 0600 file |
 
@@ -179,6 +183,10 @@ Options for opencode:
       --model <name>      Model to use (default: glm-5.2:cloud, env: AI_SANDBOX_OPENCODE_MODEL)
       --base-url <url>    API endpoint (default: https://ollama.com/v1, env: AI_SANDBOX_OPENCODE_BASE_URL)
       --no-api-key        Do not require AI_SANDBOX_OPENCODE_API_KEY (endpoints that ignore it)
+
+Options for codex:
+      --login             Sign in with ChatGPT in the browser, then exit. Done
+                          automatically when the sandbox has no login yet
 ```
 
 ## Multiple Repositories
@@ -277,19 +285,15 @@ Vertex variables can be defined in `~/.config/ai-sandbox/env` or exported in the
 Installed via `npm install -g @openai/codex`. Two authentication methods are supported:
 
 - **API key**: set `OPENAI_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
-- **ChatGPT login** (including Business and Enterprise workspaces): kept in the sandbox's own Codex home, described below. There are two ways to sign in:
-  1. **Device code**: `ai-sandbox codex . -- login --device-auth`. On a Business or Enterprise workspace this works only if an admin has enabled device code login.
-  2. **Browser, from the sandbox**: start Codex and pick the ChatGPT sign-in. Once you approve, the browser is redirected to `http://127.0.0.1:1455/auth/callback?…` and fails to load it. Codex is listening on port 1455 *inside* the container, while the browser is on the host's loopback, and no container port is ever published (see [Security Model](#security-model)). Hand the redirect to the container instead: while Codex is still waiting, copy the full address from the browser's address bar and run, from a second terminal,
+- **ChatGPT login** (including Business and Enterprise workspaces), kept in the sandbox's own Codex home, described below. When the sandbox has no login yet, `ai-sandbox codex` signs you in before the session starts. It prints a link: open it in the browser and approve, and the browser lands on Codex's "signed in" page. `ai-sandbox codex --login` signs in again, for instance after Codex reports that the session has expired; `ai-sandbox codex . -- login` does the same. If the sign-in fails, you are asked whether to start the session anyway. No sign-in is attempted when `OPENAI_API_KEY` is set, or when the sandbox's `config.toml` selects another `model_provider`.
 
-     ```bash
-     podman exec sandbox-codex-12345 curl -sSL 'http://127.0.0.1:1455/auth/callback?code=…&state=…'
-     ```
+  Codex's sign-in sends the browser to `http://127.0.0.1:1455/auth/callback`, where `codex login` is listening, but inside the container, while the browser is on the host's loopback, and no container port is ever published (see [Security Model](#security-model)). So the sign-in runs in a throwaway container of its own, with only the Codex home mounted, and for as long as it lasts `ai-sandbox-login-relay` (python3, standard library only) listens on the host's `127.0.0.1:1455` and hands each callback to that container through `podman exec`. If something on the host already holds port 1455 (a `codex login` running on the host, for instance), the sign-in stops and says so.
 
-     The container name is printed in the startup banner (`Container:`; for a `--web` session it is `sandbox-<session>`). Use the address from the same sign-in attempt, since Codex checks its `state`, and keep it in single quotes, because it contains `&`.
+  Codex's own sign-in screen, which it shows when a session starts without a valid login, cannot complete the browser sign-in from inside the sandbox: quit and run `ai-sandbox codex --login`. Where the workspace admin has enabled device codes, `ai-sandbox codex . -- login --device-auth` works too, with no relay.
 
   Copying the host's `~/.codex/auth.json` into the sandbox is not a substitute. Both copies would hold one refresh token, and whichever side refreshes second is signed out ("your refresh token was already used"). A sign-in done in the sandbox gets a token of its own.
 
-**Codex home.** `~/.config/ai-sandbox/codex/` is mounted as `~/.codex` inside the container: login, settings (`config.toml`), sessions and history. `install.sh` creates it with mode `0700`, or the first run does. The host's own `~/.codex` is never mounted, as with [claude-vertex](#claude-code-via-vertex-ai). Codex runs here with its own sandbox off (see below), so it can write anything the container can reach. The host's `~/.codex` holds what the host's codex later executes outside any sandbox: `config.toml` (`notify`, MCP server commands), hooks and rules. It also holds the host's background-server install and socket links, which do not resolve inside the container. Earlier versions of ai-sandbox mounted the host's `~/.codex`, so sign in once with one of the methods above. Copy settings into the sandbox's home deliberately, and keep in mind that anything placed there is writable by the agent.
+**Codex home.** `~/.config/ai-sandbox/codex/` is mounted as `~/.codex` inside the container: login, settings (`config.toml`), sessions and history. `install.sh` creates it with mode `0700`, or the first run does. The host's own `~/.codex` is never mounted, as with [claude-vertex](#claude-code-via-vertex-ai). Codex runs here with its own sandbox off (see below), so it can write anything the container can reach. The host's `~/.codex` holds what the host's codex later executes outside any sandbox: `config.toml` (`notify`, MCP server commands), hooks and rules. It also holds the host's background-server install and socket links, which do not resolve inside the container. Earlier versions of ai-sandbox mounted the host's `~/.codex`, so the first run signs in once. Copy settings into the sandbox's home deliberately, and keep in mind that anything placed there is writable by the agent.
 
 The image's entrypoint adds two settings, placed before any arguments you pass after `--`:
 

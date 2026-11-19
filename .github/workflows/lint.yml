@@ -37,13 +37,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ai-sandbox-web has no extension, so ShellCheck's glob does not pick it
-      # up; it is Python and must not be linted as shell.
-      - name: Byte-compile the dashboard
-        run: python -m py_compile web/ai-sandbox-web
+      # ai-sandbox-web and ai-sandbox-login-relay have no extension, so
+      # ShellCheck's glob does not pick them up; they are Python and must not
+      # be linted as shell.
+      - name: Byte-compile the dashboard and the sign-in relay
+        run: python -m py_compile web/ai-sandbox-web ai-sandbox-login-relay
 
       - name: Ruff
-        run: pipx run ruff check --target-version py39 web/ai-sandbox-web
+        run: pipx run ruff check --target-version py39 web/ai-sandbox-web ai-sandbox-login-relay
+
+      # Needs neither podman nor Codex: a fake podman and a fake login server
+      # stand in for the container.
+      - name: Codex sign-in relay
+        run: bash test/test_login_relay.sh
 
   hadolint:
     name: Hadolint
