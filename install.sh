@@ -357,6 +357,14 @@ EOF
         echo '{}' > "$vertex_json"
     fi
 
+    # The codex agent's own Codex home (mounted as ~/.codex; see README
+    # "Codex"). 0700: its login, auth.json, lives there.
+    local codex_home="${sandbox_config}/codex"
+    if [[ ! -d "$codex_home" ]]; then
+        log "Creating ${codex_home}/"
+        install -d -m 0700 "$codex_home"
+    fi
+
     local cursor_config="${HOME}/.config/cursor"
     if [[ ! -d "$cursor_config" ]]; then
         log "Creating ${cursor_config}/"

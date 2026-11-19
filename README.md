@@ -277,7 +277,26 @@ Vertex variables can be defined in `~/.config/ai-sandbox/env` or exported in the
 Installed via `npm install -g @openai/codex`. Two authentication methods are supported:
 
 - **API key**: set `OPENAI_API_KEY` in your environment or in `~/.config/ai-sandbox/env`
-- **OAuth (ChatGPT login)**: run `codex login` on the host first, then `~/.codex/` is automatically mounted into the container (contains `auth.json` and `config.toml`)
+- **ChatGPT login** (including Business and Enterprise workspaces): kept in the sandbox's own Codex home, described below. There are two ways to sign in:
+  1. **Device code**: `ai-sandbox codex . -- login --device-auth`. On a Business or Enterprise workspace this works only if an admin has enabled device code login.
+  2. **Browser, from the sandbox**: start Codex and pick the ChatGPT sign-in. Once you approve, the browser is redirected to `http://127.0.0.1:1455/auth/callback?…` and fails to load it. Codex is listening on port 1455 *inside* the container, while the browser is on the host's loopback, and no container port is ever published (see [Security Model](#security-model)). Hand the redirect to the container instead: while Codex is still waiting, copy the full address from the browser's address bar and run, from a second terminal,
+
+     ```bash
+     podman exec sandbox-codex-12345 curl -sSL 'http://127.0.0.1:1455/auth/callback?code=…&state=…'
+     ```
+
+     The container name is printed in the startup banner (`Container:`; for a `--web` session it is `sandbox-<session>`). Use the address from the same sign-in attempt, since Codex checks its `state`, and keep it in single quotes, because it contains `&`.
+
+  Copying the host's `~/.codex/auth.json` into the sandbox is not a substitute. Both copies would hold one refresh token, and whichever side refreshes second is signed out ("your refresh token was already used"). A sign-in done in the sandbox gets a token of its own.
+
+**Codex home.** `~/.config/ai-sandbox/codex/` is mounted as `~/.codex` inside the container: login, settings (`config.toml`), sessions and history. `install.sh` creates it with mode `0700`, or the first run does. The host's own `~/.codex` is never mounted, as with [claude-vertex](#claude-code-via-vertex-ai). Codex runs here with its own sandbox off (see below), so it can write anything the container can reach. The host's `~/.codex` holds what the host's codex later executes outside any sandbox: `config.toml` (`notify`, MCP server commands), hooks and rules. It also holds the host's background-server install and socket links, which do not resolve inside the container. Earlier versions of ai-sandbox mounted the host's `~/.codex`, so sign in once with one of the methods above. Copy settings into the sandbox's home deliberately, and keep in mind that anything placed there is writable by the agent.
+
+The image's entrypoint adds two settings, placed before any arguments you pass after `--`:
+
+- **`--no-daemon`**: Codex 0.156 and later start a background server meant to be shared between sessions, which a container has no use for. Started inside the sandbox, it would copy a ~370 MB package into the Codex home and leave a self-updater running. Releases before 0.156 have neither the server nor the flag, so the entrypoint passes the flag only when `codex --help` lists it.
+- **`sandbox_mode = "danger-full-access"`** (as a `-c` override): Codex's own sandbox (bubblewrap) cannot create its namespaces under the container's `--cap-drop=ALL` and `no-new-privileges`. The container is the boundary, which is the setup Codex's documentation recommends this mode for. An explicit `--sandbox` passed after `--` still takes precedence. Approval prompts are still configured, but with no inner sandbox to step out of, Codex rarely asks: it can write anything in the mounted repositories, including `.git/hooks`, which git on the host would run. A Business or Enterprise workspace can disallow `danger-full-access` through its managed requirements. If yours does, Codex has no working sandbox mode in this image, because its own sandbox cannot run here.
+
+The startup banner shows both, and flags an image built before them: rebuild it with `ai-sandbox --build codex`.
 
 ### Cursor Agent
 
@@ -362,7 +381,7 @@ Security notes:
 
 - **Claude**: if `~/.claude` exists on the host, it is bind-mounted into the container for OAuth session persistence.
 - **Claude Vertex**: `~/.config/gcloud` is mounted read-only for GCP credentials. Uses dedicated `~/.config/ai-sandbox/claude-vertex/` and `claude-vertex.json` instead of the host's `~/.claude/` and `~/.claude.json`, ensuring full isolation between personal and vertex sessions.
-- **Codex**: if `~/.codex` exists on the host, it is bind-mounted into the container for OAuth/cached login persistence.
+- **Codex**: `~/.config/ai-sandbox/codex/` is mounted as `~/.codex` (login, settings, sessions), and created (mode `0700`) if it does not exist. The host's `~/.codex` is never mounted. See [Codex](#codex).
 - **Cursor**: if `~/.cursor` exists on the host, it is bind-mounted into the container so `cursor-agent` has access to its project state and config. `~/.config/cursor/` is also bind-mounted read-write for auth and configuration persistence.
 
 ## Command Blocking (BPF LSM)
