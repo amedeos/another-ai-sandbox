@@ -1,6 +1,7 @@
 # =============================================================================
 # OpenAI Codex CLI - sandboxed container
-# Auth: OPENAI_API_KEY env var or OAuth/cached login via ~/.codex/
+# Auth: OPENAI_API_KEY env var, or a ChatGPT login kept in the sandbox's own
+# Codex home (~/.config/ai-sandbox/codex on the host, mounted as ~/.codex)
 # =============================================================================
 FROM localhost/agent-base:latest
 
@@ -9,6 +10,10 @@ RUN npm install -g @openai/codex
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+# Read by ai-sandbox: an image without it predates the entrypoint that runs
+# Codex with --no-daemon and danger-full-access, and is reported as stale.
+LABEL ai-sandbox.codex-defaults="no-daemon,danger-full-access"
 
 USER agent
 WORKDIR /workspace

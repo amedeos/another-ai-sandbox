@@ -11,7 +11,8 @@
 #
 # Install:
 #   1. Checks host prerequisites (podman, pasta, git, cgroups v2, python3)
-#   2. Installs ai-sandbox and ai-sandbox-build to ~/.local/bin/
+#   2. Installs ai-sandbox, ai-sandbox-build and ai-sandbox-login-relay to
+#      ~/.local/bin/
 #   3. Copies Containerfiles/entrypoints to ~/.local/share/ai-sandbox/
 #   4. Builds container images via ai-sandbox-build (unless --no-build),
 #      asking first whether to include PrusaSlicer (default: yes on a first
@@ -23,9 +24,10 @@
 # Uninstall:
 #   Stops and removes the web dashboard unit, offers to remove any --web
 #   sessions still running, removes ai-sandbox, ai-sandbox-build,
-#   ai-sandbox-loader and ai-sandbox-web from ~/.local/bin, removes build data
-#   from ~/.local/share/ai-sandbox/, optionally removes container images and
-#   ~/.config/ai-sandbox, and cleans the PATH line added to the shell profile.
+#   ai-sandbox-login-relay, ai-sandbox-loader and ai-sandbox-web from
+#   ~/.local/bin, removes build data from ~/.local/share/ai-sandbox/,
+#   optionally removes container images and ~/.config/ai-sandbox, and cleans
+#   the PATH line added to the shell profile.
 # =============================================================================
 set -euo pipefail
 
@@ -146,17 +148,18 @@ check_prerequisites() {
         echo -e "  ${YELLOW}!${NC} sudo    — not found (needed only for BPF command blocking)"
     fi
 
-    # python3 (the web dashboard; standard library only, no venv or pip)
+    # python3 (the web dashboard and the Codex sign-in relay; standard library
+    # only, no venv or pip)
     if command -v python3 >/dev/null 2>&1; then
         local pyver
         pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "?")"
         if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
             echo -e "  ${GREEN}✓${NC} python3 (${pyver})"
         else
-            echo -e "  ${YELLOW}!${NC} python3 — ${pyver} is too old for the web dashboard (needs 3.9+)"
+            echo -e "  ${YELLOW}!${NC} python3 — ${pyver} is too old for the web dashboard and the Codex sign-in (needs 3.9+)"
         fi
     else
-        echo -e "  ${YELLOW}!${NC} python3 — not found (needed only for the web dashboard)"
+        echo -e "  ${YELLOW}!${NC} python3 — not found (needed only for the web dashboard and the Codex sign-in)"
         info "    Fedora: dnf install python3 / Gentoo: emerge dev-lang/python / Debian: apt install python3"
     fi
 
@@ -181,7 +184,9 @@ install_script() {
     install -d "${INSTALL_DIR}"
     install -m 755 "${SCRIPT_DIR}/ai-sandbox" "${INSTALL_DIR}/ai-sandbox"
     install -m 755 "${SCRIPT_DIR}/ai-sandbox-build" "${INSTALL_DIR}/ai-sandbox-build"
-    log "ai-sandbox and ai-sandbox-build installed successfully"
+    # Run by ai-sandbox for the Codex sign-in (README "Codex"); needs python3.
+    install -m 755 "${SCRIPT_DIR}/ai-sandbox-login-relay" "${INSTALL_DIR}/ai-sandbox-login-relay"
+    log "ai-sandbox, ai-sandbox-build and ai-sandbox-login-relay installed successfully"
 }
 
 # --- Install build data (Containerfiles, entrypoints) ------------------------
@@ -355,6 +360,14 @@ EOF
     if [[ ! -f "$vertex_json" ]]; then
         log "Creating ${vertex_json}"
         echo '{}' > "$vertex_json"
+    fi
+
+    # The codex agent's own Codex home (mounted as ~/.codex; see README
+    # "Codex"). 0700: its login, auth.json, lives there.
+    local codex_home="${sandbox_config}/codex"
+    if [[ ! -d "$codex_home" ]]; then
+        log "Creating ${codex_home}/"
+        install -d -m 0700 "$codex_home"
     fi
 
     local cursor_config="${HOME}/.config/cursor"
@@ -666,6 +679,12 @@ do_uninstall() {
     if [[ -f "${INSTALL_DIR}/ai-sandbox-build" ]]; then
         rm -f "${INSTALL_DIR}/ai-sandbox-build"
         log "Removed ${INSTALL_DIR}/ai-sandbox-build"
+        removed=1
+    fi
+
+    if [[ -f "${INSTALL_DIR}/ai-sandbox-login-relay" ]]; then
+        rm -f "${INSTALL_DIR}/ai-sandbox-login-relay"
+        log "Removed ${INSTALL_DIR}/ai-sandbox-login-relay"
         removed=1
     fi
 

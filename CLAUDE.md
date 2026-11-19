@@ -22,10 +22,10 @@ podman build --format docker --tag localhost/agent-opencode:latest --file openco
 **Lint:**
 ```bash
 # Shell scripts (CI uses ShellCheck)
-shellcheck ai-sandbox ai-sandbox-build install.sh base/ai-sandbox-supervise claude-code/entrypoint.sh codex/entrypoint.sh cursor-agent/entrypoint.sh opencode/entrypoint.sh test/test_bpf_blocker.sh test/test_webui.sh
+shellcheck ai-sandbox ai-sandbox-build install.sh base/ai-sandbox-supervise claude-code/entrypoint.sh codex/entrypoint.sh cursor-agent/entrypoint.sh opencode/entrypoint.sh test/test_bpf_blocker.sh test/test_login_relay.sh test/test_webui.sh
 
-# Web dashboard (Python; CI runs py_compile + ruff)
-python3 -m py_compile web/ai-sandbox-web && ruff check web/ai-sandbox-web
+# Web dashboard and Codex sign-in relay (Python; CI runs py_compile + ruff)
+python3 -m py_compile web/ai-sandbox-web ai-sandbox-login-relay && ruff check web/ai-sandbox-web ai-sandbox-login-relay
 
 # Containerfiles (CI uses Hadolint)
 hadolint base/Containerfile claude-code/Containerfile codex/Containerfile cursor-agent/Containerfile opencode/Containerfile
@@ -47,9 +47,14 @@ sudo bash test/test_bpf_blocker.sh
 bash test/test_webui.sh
 ```
 
+**Tests (Codex sign-in relay, python3 + curl only: a fake podman, no images; CI runs it):**
+```bash
+bash test/test_login_relay.sh
+```
+
 ## Architecture
 
-There are three main Bash scripts, one Python script, and a BPF subsystem:
+There are three main Bash scripts, two Python scripts, and a BPF subsystem:
 
 - **`ai-sandbox`** — the user-facing wrapper. Parses arguments, validates auth/images, constructs a `podman run` command with all security flags, and optionally starts the BPF loader for `--block-cmd` rules. Three execution modes: normal (`exec podman run`), BPF-blocking (starts the container in the background, resolves its cgroup, launches the loader, then `podman attach`), and web (`--web`: starts detached with `--rm`, then attaches with `podman exec ... zellij attach`, so detaching does not kill the agent). Also dispatches the `attach`/`list`/`stop`/`web` subcommands.
 
@@ -57,7 +62,9 @@ There are three main Bash scripts, one Python script, and a BPF subsystem:
 
 - **`install.sh`** — installer/uninstaller. Checks prerequisites, copies scripts and Containerfiles, creates config dirs, builds images, optionally builds BPF loader, handles PATH setup. `--uninstall` reverses everything interactively.
 
-- **`web/ai-sandbox-web`** — the web dashboard. The only Python in the repo, and standard-library only by policy: this project installs no runtime dependencies. It lists/starts/stops `--web` sessions and serves a browser terminal over SSE (output) plus POST (input), driving containers with `podman exec`.
+- **`web/ai-sandbox-web`** — the web dashboard. Python, like `ai-sandbox-login-relay`, and standard-library only by policy: this project installs no runtime dependencies. It lists/starts/stops `--web` sessions and serves a browser terminal over SSE (output) plus POST (input), driving containers with `podman exec`.
+
+- **`ai-sandbox-login-relay`** — the Codex sign-in. `codex login` waits for the OAuth redirect on `127.0.0.1:1455` inside the container while the browser is on the host, so `codex_login` in `ai-sandbox` runs the sign-in container under this relay: it binds the host's `127.0.0.1:1455`, runs the `podman run … login` command it is given in the foreground, and hands each callback to the container through `podman exec`. `ai-sandbox codex` signs in this way on its own when the sandbox has neither an API key nor a login, and on `--login`.
 
 - **`base/ai-sandbox-supervise`** — entrypoint shim in every agent image. A transparent `exec "$@"` unless `AI_SANDBOX_WEB=1`, in which case it starts the agent in a detached zellij session and becomes the process that keeps the container alive.
 
@@ -68,8 +75,8 @@ There are three main Bash scripts, one Python script, and a BPF subsystem:
 ## CI
 
 Two GitHub Actions workflows on push/PR to `main`:
-- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `ai-sandbox-build` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` (it is Python and must stay out of the ShellCheck sweep); Hadolint on all Containerfiles
-- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `zellij --version` and `uv --version` in the base image, and `ai-sandbox-supervise` passthrough); also builds the base a second time with `WITH_PRUSASLICER=1` and slices a cube in it headless, and checks that the default build has no PrusaSlicer
+- **Lint** (`lint.yml`): ShellCheck on all `.sh`/`.bash` files + `ai-sandbox` + `ai-sandbox-build` + `base/ai-sandbox-supervise`; `py_compile` and `ruff` on `web/ai-sandbox-web` and `ai-sandbox-login-relay` (Python, which must stay out of the ShellCheck sweep), and `test/test_login_relay.sh`; Hadolint on all Containerfiles
+- **Build** (`build.yml`): Builds all images with Podman, runs smoke tests (`--version` on each agent image, `login status` on codex to prove a subcommand still parses after the entrypoint's options, and that the installed codex lists `--no-daemon`, `zellij --version` and `uv --version` in the base image, and `ai-sandbox-supervise` passthrough); also builds the base a second time with `WITH_PRUSASLICER=1` and slices a cube in it headless, and checks that the default build has no PrusaSlicer
 
 ## Git Policy
 
@@ -82,12 +89,14 @@ Do NOT create commits automatically. All commits must be reviewed and approved b
 - Container images are tagged `localhost/agent-{base,claude,codex,cursor,opencode}:latest`.
 - `claude-vertex` shares the `agent-claude` image; there is no separate build target.
 - Host directories that must persist are bind-mounted **outside** `/home/agent` (e.g. `opencode/` uses `/state`) and symlinked into place by the entrypoint. Mounting them directly under `/home/agent` makes podman create the parent directories as container root, which the `agent` user cannot write into.
+- An entrypoint's own options for the agent go **before** `"$@"`: after a subcommand the CLI rejects top-level options (`codex login status --no-daemon` is a usage error), and `--help` hides this because it returns before unknown options are reported. An option a cached, older agent may not know is passed only when the agent's `--help` lists it (`codex/entrypoint.sh`).
+- `codex` gets a Codex home of its own, `~/.config/ai-sandbox/codex` mounted as `~/.codex`, never the host's `~/.codex`. It is mounted straight onto `/home/agent/.codex`, as claude-vertex's `~/.claude` is, and with `:z` rather than `:Z`: a private label belongs to one container, so `ai-sandbox codex --login` or a second session would relabel the directory away from a session already running. The `/state` rule above is about deeper paths, whose missing parents podman would create as root, and the parent here is the tmpfs root itself, already owned by `agent`. Codex runs with `danger-full-access`, because its bubblewrap sandbox cannot start under `--cap-drop=ALL`, so everything mounted is writable without a prompt. The host's `~/.codex` holds what the host's codex executes outside any sandbox (`config.toml` `notify`, MCP server commands, hooks). For the same reason, an entrypoint never repairs or rewrites state in a host directory mounted into the container (PR #49 repointed symlinks in the host's `~/.codex`).
 - The `agent` user (UID 1000) runs inside containers. `--userns=keep-id:uid=1000,gid=1000` maps host UID to container UID 1000.
 - When adding or removing packages in `base/Containerfile`, always update the package list in the **Base Image** section of `README.md` to match.
 - PrusaSlicer is opt-in (`ARG WITH_PRUSASLICER`, default 0; `install.sh` asks — yes on a first install, the current image's label on a reinstall — and retries without it when `ai-sandbox-build` exits 3) and has a layer of its own **after** the package layer. Keep it there: even headless it links GL/EGL/X11/GTK3/wx/WebKitGTK, which the package layer's `rpm -e --nodeps` strips for mupdf — added to that `dnf install` list instead, the build would succeed and the binary would not start. Do not run `strip` in that layer either: strip rewrites every file it touches, copying the package layer's files into the new one. The `ai-sandbox.prusaslicer` label is what `ai-sandbox-build` reads to keep the choice across rebuilds, and CI proves the layer with a real headless slice, not `--help`.
 - Binaries downloaded into an image, and browser assets downloaded by `install.sh`, are pinned by version **and** verified against a pinned SHA256. Do not add an unverified download.
 - Podman labels live under the `ai-sandbox.*` namespace. Any operation on a caller-supplied session name must re-verify `ai-sandbox.web=1` on the container itself (`resolve_web_container` in `ai-sandbox`, `resolve_container` in `ai-sandbox-web`) rather than trusting a listing — that is what makes non-`--web` sessions invisible rather than merely refused.
-- **No container port is ever published.** The web layer reaches containers only through `podman exec`; `README.md` records the decision to keep host↔container network plumbing out of scope, and `test/test_webui.sh` enforces it.
+- **No container port is ever published.** The web layer reaches containers only through `podman exec`; `README.md` records the decision to keep host↔container network plumbing out of scope, and `test/test_webui.sh` enforces it. The Codex sign-in keeps to the same rule: `ai-sandbox-login-relay` listens on the host's `127.0.0.1:1455` only while `codex login` runs in a throwaway container, and forwards just `/auth/callback` and `/success` to it through `podman exec … curl`, with the URL on curl's stdin so that the authorization code never appears in a process listing or on the terminal.
 - Anything that both container PID 1 and `podman exec` must agree on (e.g. `ZELLIJ_SOCKET_DIR`) belongs in the Containerfile as `ENV`, not as an entrypoint export: `podman exec` inherits `Config.Env`, not the entrypoint's runtime exports. The same applies to anything the *agent* must see: zellij gives its panes the environment of the zellij server, i.e. of container PID 1, so `TERM` reaches the agent only through `podman run` (`-e`, or the image's `ENV`). A `TERM` passed to `podman exec ... zellij attach` configures the client and never the agent — verified: a pane whose server had no `TERM` has none either, and the agent then renders in black and white.
 - Never poll `zellij list-sessions` in a wait loop. Every zellij client connection resets the session's idle teardown, so the poll keeps alive the session it is waiting to see end; watch the session socket instead.
 - Always check the exit status of a `podman` call. A bad `--format` template makes podman fail the whole invocation, which an unchecked caller reads as "no containers" rather than as an error. Prefer `--format json` for listings (`list_sessions` in `ai-sandbox-web`); where a template is used, remember its fields are Go **struct** names, not the JSON keys of the same output — the container id is `{{.ID}}`, and `{{.Id}}` is a template error.

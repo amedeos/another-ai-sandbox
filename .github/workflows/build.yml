@@ -207,6 +207,33 @@ jobs:
       - name: Smoke test – codex
         run: podman run --rm localhost/agent-codex:latest --version
 
+      # The entrypoint adds top-level options before the user's arguments; a
+      # subcommand after them must still parse. `--help` cannot show this, since
+      # it returns before an unknown option is reported. Without credentials
+      # `login status` exits 1; a usage error would exit 2 instead.
+      - name: Smoke test – codex subcommand after entrypoint options
+        run: |
+          status=0
+          out=$(podman run --rm localhost/agent-codex:latest login status 2>&1) || status=$?
+          echo "$out"
+          [ "$status" -le 1 ]
+          echo "$out" | grep -qi 'logged in'
+
+      # The entrypoint passes --no-daemon only when `codex --help` lists it,
+      # so a release that hides or renames the flag would drop it silently;
+      # this is where that shows up. The pattern is the entrypoint's own.
+      - name: Smoke test – codex lists --no-daemon, image carries its label
+        run: |
+          # No pipe, as for the editor test above: captured, so a failing
+          # podman fails the step instead of only feeding grep nothing.
+          help=$(podman run --rm --entrypoint codex \
+            localhost/agent-codex:latest --help)
+          grep -qE -- '(^|[[:space:],])--no-daemon([[:space:],=]|$)' <<<"$help"
+          label=$(podman image inspect \
+            --format '{{index .Config.Labels "ai-sandbox.codex-defaults"}}' \
+            localhost/agent-codex:latest)
+          [ -n "$label" ]
+
       - name: Smoke test – cursor-agent
         run: podman run --rm localhost/agent-cursor:latest --version
 
