@@ -17,6 +17,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #                                     (the optional PrusaSlicer layer below brings them back)
 #   strip --strip-unneeded            remove debug symbols from ELF binaries
 #   rm -rf …/doc,man,info,locale      remove residual documentation
+# Only rpm -e and strip are best-effort.  Their `|| true` sits inside { …; }:
+# outside it, `a && b || true && c` reads as `((a && b) || true) && c`, so a
+# failed dnf install or oc download would let the chain carry on and leave a
+# "successful" build.
 RUN dnf install -y \
         --setopt=install_weak_deps=False \
         --setopt=tsflags=nodocs \
@@ -66,20 +70,20 @@ RUN dnf install -y \
         pandoc \
     && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && rm -f /usr/bin/mupdf /usr/bin/mupdf-gl /usr/bin/mupdf-x11 \
-    && rpm -e --nodeps \
+    && { rpm -e --nodeps \
         llvm-libs llvm-filesystem \
         mesa-dri-drivers mesa-libGL mesa-libgbm mesa-filesystem \
         hwdata \
         freeglut libglvnd libglvnd-opengl libglvnd-glx \
         libX11 libX11-common libX11-xcb libXau libXext libXi libXrender libXxf86vm \
         libxcb libxshmfence \
-        2>/dev/null || true \
-    && curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
+        2>/dev/null || true; } \
+    && curl -fsSL --retry 3 --retry-delay 2 https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
         | tar xz -C /usr/local/bin oc kubectl \
     && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl \
     && dnf clean all \
     && rm -rf /var/cache/dnf /usr/share/doc /usr/share/man /usr/share/info /usr/share/locale \
-    && find /usr -type f \( -name '*.so*' -o -perm /111 \) -exec strip --strip-unneeded {} + 2>/dev/null || true \
+    && { find /usr -type f \( -name '*.so*' -o -perm /111 \) -exec strip --strip-unneeded {} + 2>/dev/null || true; } \
     && rm -rf /usr/lib/.build-id
 
 # Optional PrusaSlicer, for headless slicing (`prusa-slicer --export-gcode`).
