@@ -70,7 +70,7 @@ There are three main Bash scripts, two Python scripts, and a BPF subsystem:
 
 - **`bpf/`** — eBPF LSM command blocker. `block_commands.bpf.c` hooks `bprm_check_security` (binary-only rules, blocks before exec) and uses a tracepoint (binary+arg rules, kills after exec). `loader.c` is the userspace loader using libbpf skeletons. Blocking is scoped to a container's cgroup v2.
 
-**Container image hierarchy:** `base/Containerfile` (Fedora 44 + tooling) → agent-specific Containerfiles (`claude-code/`, `codex/`, `cursor-agent/`, `opencode/`) each `FROM localhost/agent-base:latest`. Nothing an agent needs at runtime may live under `/home/agent`, which is replaced by a tmpfs: installers that write there (`claude-code/`, `cursor-agent/`) are copied to `/opt` at build time, while npm global installs (`codex/`, `opencode/`) already land outside it.
+**Container image hierarchy:** `base/Containerfile` (Fedora 45 + tooling) → agent-specific Containerfiles (`claude-code/`, `codex/`, `cursor-agent/`, `opencode/`) each `FROM localhost/agent-base:latest`. Nothing an agent needs at runtime may live under `/home/agent`, which is replaced by a tmpfs: installers that write there (`claude-code/`, `cursor-agent/`) are copied to `/opt` at build time, while npm global installs (`codex/`, `opencode/`) already land outside it.
 
 ## CI
 

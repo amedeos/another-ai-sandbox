@@ -2,7 +2,7 @@
 # Base image for AI agent sandboxing
 # Provides common tooling: Node.js, Python, Git, curl
 # =============================================================================
-FROM registry.fedoraproject.org/fedora:44
+FROM registry.fedoraproject.org/fedora:45
 
 LABEL maintainer="amedeo" \
       description="Base image for sandboxed AI coding agents"
@@ -170,10 +170,11 @@ LABEL ai-sandbox.zellij="0.45.1"
 # fallback directly.  UV_PYTHON_PREFERENCE is the same tmpfs story seen from
 # the interpreter side: uv's default prefers a *managed* interpreter over a
 # system one (it still prefers a system one over downloading, so the default
-# does not fetch anything while python3.12/3.13/3.14 satisfy the request), and
-# a managed interpreter installed mid-session lives in the tmpfs and is gone
-# at exit.  `system` keeps the image's own interpreters as the first choice
-# and leaves a download as the fallback for a version that is not here.
+# does not fetch anything while the image's own interpreters satisfy the
+# request), and a managed interpreter installed mid-session lives in the tmpfs
+# and is gone at exit.  `system` keeps the image's own interpreters as the
+# first choice and leaves a download as the fallback for a version that is not
+# here.
 ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
     ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
     TERM=xterm-256color \
