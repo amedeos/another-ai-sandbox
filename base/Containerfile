@@ -2,7 +2,7 @@
 # Base image for AI agent sandboxing
 # Provides common tooling: Node.js, Python, Git, curl
 # =============================================================================
-FROM registry.fedoraproject.org/fedora:44
+FROM registry.fedoraproject.org/fedora:45
 
 LABEL maintainer="amedeo" \
       description="Base image for sandboxed AI coding agents"
@@ -17,6 +17,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #                                     (the optional PrusaSlicer layer below brings them back)
 #   strip --strip-unneeded            remove debug symbols from ELF binaries
 #   rm -rf …/doc,man,info,locale      remove residual documentation
+# Only rpm -e and strip are best-effort.  Their `|| true` sits inside { …; }:
+# outside it, `a && b || true && c` reads as `((a && b) || true) && c`, so a
+# failed dnf install or oc download would let the chain carry on and leave a
+# "successful" build.
 RUN dnf install -y \
         --setopt=install_weak_deps=False \
         --setopt=tsflags=nodocs \
@@ -31,6 +35,9 @@ RUN dnf install -y \
         python3.13 \
         python3.13-devel \
         python3.13-libs \
+        python3.14 \
+        python3.14-devel \
+        python3.14-libs \
         curl \
         findutils \
         diffutils \
@@ -66,20 +73,20 @@ RUN dnf install -y \
         pandoc \
     && rm -f /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd \
     && rm -f /usr/bin/mupdf /usr/bin/mupdf-gl /usr/bin/mupdf-x11 \
-    && rpm -e --nodeps \
+    && { rpm -e --nodeps \
         llvm-libs llvm-filesystem \
         mesa-dri-drivers mesa-libGL mesa-libgbm mesa-filesystem \
         hwdata \
         freeglut libglvnd libglvnd-opengl libglvnd-glx \
         libX11 libX11-common libX11-xcb libXau libXext libXi libXrender libXxf86vm \
         libxcb libxshmfence \
-        2>/dev/null || true \
-    && curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
+        2>/dev/null || true; } \
+    && curl -fsSL --retry 3 --retry-delay 2 https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
         | tar xz -C /usr/local/bin oc kubectl \
     && chmod 755 /usr/local/bin/oc /usr/local/bin/kubectl \
     && dnf clean all \
     && rm -rf /var/cache/dnf /usr/share/doc /usr/share/man /usr/share/info /usr/share/locale \
-    && find /usr -type f \( -name '*.so*' -o -perm /111 \) -exec strip --strip-unneeded {} + 2>/dev/null || true \
+    && { find /usr -type f \( -name '*.so*' -o -perm /111 \) -exec strip --strip-unneeded {} + 2>/dev/null || true; } \
     && rm -rf /usr/lib/.build-id
 
 # Optional PrusaSlicer, for headless slicing (`prusa-slicer --export-gcode`).
@@ -166,10 +173,11 @@ LABEL ai-sandbox.zellij="0.45.1"
 # fallback directly.  UV_PYTHON_PREFERENCE is the same tmpfs story seen from
 # the interpreter side: uv's default prefers a *managed* interpreter over a
 # system one (it still prefers a system one over downloading, so the default
-# does not fetch anything while python3.12/3.13/3.14 satisfy the request), and
-# a managed interpreter installed mid-session lives in the tmpfs and is gone
-# at exit.  `system` keeps the image's own interpreters as the first choice
-# and leaves a download as the fallback for a version that is not here.
+# does not fetch anything while the image's own interpreters satisfy the
+# request), and a managed interpreter installed mid-session lives in the tmpfs
+# and is gone at exit.  `system` keeps the image's own interpreters as the
+# first choice and leaves a download as the fallback for a version that is not
+# here.
 ENV ZELLIJ_SOCKET_DIR=/tmp/zellij-sock \
     ZELLIJ_CONFIG_FILE=/etc/zellij/config.kdl \
     TERM=xterm-256color \
