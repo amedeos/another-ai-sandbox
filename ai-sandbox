@@ -99,9 +99,11 @@ validate_cpus() {
     fi
 }
 
-# A session name becomes a zellij IPC socket filename, a podman container name
-# and a dashboard URL path segment, so keep it conservative.  The 48-character
-# cap is also what keeps the socket path inside its 107-byte limit.
+# A session name becomes a zellij session name, a podman container name and a
+# dashboard URL path segment, so keep it conservative.  zellij names the socket
+# by an id since 0.46, but falls back to the session name when its index is
+# unavailable, so the 48-character cap still keeps the socket path inside its
+# 107-byte limit.
 validate_session_name() {
     local value="$1"
     if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]]; then

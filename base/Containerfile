@@ -123,12 +123,12 @@ RUN useradd -m -s /bin/bash agent
 # package layer above (whose trailing `strip` would also invalidate the hash).
 #
 # The "no-web" build is deliberate: zellij ships its own web server, which this
-# project does not use (see README "Web UI"), and omitting it saves ~4 MB.
+# project does not use (see README "Web UI"), and omitting it saves ~8 MB.
 # Upstream publishes a .sha256sum sidecar per asset covering the EXTRACTED
 # binary rather than the tarball, so verification happens after extraction.
-ARG ZELLIJ_VERSION=0.45.1
-ARG ZELLIJ_SHA256_X86_64=0ec6ef07b63c6355c02ce18343d40ef5ef5af19e25313ea9009c8fceda29e94f
-ARG ZELLIJ_SHA256_AARCH64=2f3965f5b4d7fbb25dfc543e91f9680c9ee7b4eb07d8a3e6392fa276fc65c509
+ARG ZELLIJ_VERSION=0.46.1
+ARG ZELLIJ_SHA256_X86_64=1d45bc1220ab1c5cc7b8279fa6bdb8f10c444085d943fa5711fcccf8b1bbbf6d
+ARG ZELLIJ_SHA256_AARCH64=715e4f4eb0d3df9712f996a85e833aa49a5e6dee0ae6f8bc2c0a9f439111fecf
 RUN set -euo pipefail \
     && case "$(uname -m)" in \
         x86_64)  zj_arch="x86_64-unknown-linux-musl";  zj_sha="${ZELLIJ_SHA256_X86_64}" ;; \
@@ -145,13 +145,24 @@ RUN set -euo pipefail \
     && install -m 755 "$zj_bin" /usr/local/bin/zellij \
     && rm -rf /tmp/zellij.tar.gz /tmp/zellij-extract
 
-LABEL ai-sandbox.zellij="0.45.1"
+LABEL ai-sandbox.zellij="${ZELLIJ_VERSION}"
 
 # `podman exec` inherits the container's configured environment (Config.Env),
 # NOT variables exported by the entrypoint at runtime.  Anything that PID 1 and
 # `podman exec ... zellij attach` must agree on therefore belongs here: pointed
 # at the wrong socket directory, an exec would silently create a *second*
 # session instead of attaching to the running one.
+#
+# Since zellij 0.46 the two must also agree on zellij's cache directory, which
+# is $XDG_CACHE_HOME/zellij, or $HOME/.cache/zellij without it.  A session's
+# socket is named by a random id instead of the session name, and the
+# name-to-id map is a sqlite index in that directory, which `zellij attach
+# <name>` and `zellij --session <name> action ...` resolve through.  With a
+# different directory on one side, that side finds no session of that name.
+# Neither variable is set here, and that is deliberate: both sides take HOME
+# from the `agent` passwd entry, and an ENV HOME would also reach the agent
+# images' `USER root` build steps (`npm install -g` among them), which would
+# then write root-owned files into /home/agent.
 #
 # The socket path has a 107-byte limit, so keep it short and on tmpfs.
 # LANG matters because the package layer removes /usr/share/locale; glibc's

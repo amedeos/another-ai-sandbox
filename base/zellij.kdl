@@ -16,6 +16,34 @@ session_serialization false
 pane_frames false
 default_layout "compact"
 
+// The compact layout's one-line bar, made mouse-inert.  zellij 0.46 moved it
+// into the "zellij:bars" plugin, where a double click on the tab name renames
+// the tab and a double click on empty space opens a new tab.  Renaming takes
+// the keys meant for the agent, and Esc then leaves the client in Tab mode,
+// where `x` closes the only tab and the session with it.  A new tab runs a
+// shell that outlives the agent, so the session never ends and --rm never
+// fires.  This alias replaces the built-in one wholesale, which is why `role`
+// is repeated.
+plugins {
+    compact-bar location="zellij:bars" {
+        role "compact-bar"
+        double_click_tab "none"
+        double_click_empty "none"
+    }
+}
+
+// The same bar's session indicator ("0 running ▾") opens the session manager
+// over the agent on a single click, and the manager can open or switch to
+// another session.  A container holds one session, so there is nothing to show.
+session_indicator false
+
+// Scrolling the agent's pane back would otherwise move the client from locked
+// to Scroll mode, whose stock keys then take the typing: `e` opens an editor
+// pane, and Enter or Esc drop to normal mode, where Ctrl+G, Ctrl+O, Ctrl+T and
+// Ctrl+B belong to zellij again.  Off, the client stays locked while scrolled
+// and the keys keep reaching the agent.
+scroll_mode_sync false
+
 // Agent TUIs and the browser terminal both rely on mouse reporting.
 mouse_mode true
 
@@ -26,6 +54,26 @@ on_force_close "detach"
 // The release-notes pane would otherwise cover the agent on the first run of
 // each new zellij version.
 show_release_notes false
+
+// Likewise the "About Zellij" startup tip, which opens floating in every new
+// session and takes the first keystroke.  ai-sandbox-supervise and both attach
+// paths still hide floating panes on top of this, as they did before it was set.
+show_startup_tips false
+
+// zellij 0.46 offers its desktop-integration setup screen to new sessions.  It
+// already skips a session started with a command, which these always are; off
+// regardless, since a container has no desktop to integrate with.
+show_setup_screen false
+
+// zellij 0.46 opens a "session card" for a re-attaching client whenever a pane
+// has reported that it needs the user (OSC 7501, which an agent hook can send).
+// It is an unfocused popup over the top-right corner of the agent's screen,
+// opened after the attach has happened, so nothing the attach paths do
+// beforehand can dismiss it.  With one session per container it has nothing
+// to offer.
+attention {
+    startup_card "never"
+}
 
 // copy_command is deliberately unset: a sandboxed agent gets no bridge to the
 // host clipboard.
@@ -56,3 +104,38 @@ keybinds {
         bind "Alt g" { SwitchToMode "Normal"; }
     }
 }
+
+// The mouse needs the same care.  zellij's default mouse bindings are bound in
+// every mode, locked included, and several of its mouse actions, most of them
+// new in 0.46, can end the session or take it away from the agent.
+//
+// The right-click menu opens over any pane whose program has not asked for mouse
+// reporting, and it offers "Close pane".  Closing the agent's only pane ends the
+// session, and --rm then removes the container: Quit by another route.  Turned
+// off, a right click goes to the focused pane only.
+context_menu_enabled false
+
+// Unbound below, each falling back to zellij's default handling, which hands the
+// click to an agent that takes the mouse.  None of them is app-first, so each
+// pre-empts even such an agent:
+//   - Ctrl+drag draws a new floating pane, whose shell outlives the agent, so
+//     the session never ends and --rm never fires.
+//   - Alt+click adds the agent's pane to a pane group.  zellij then starts its
+//     multiple-select plugin, which captures every key: a plain `c` closes the
+//     grouped panes, the agent's included.  Alt+right-click ungroups again,
+//     and is only meaningful alongside it.
+//   - Alt+click on a file path in the agent's output also hands the path to
+//     the link plugin, which opens it in a floating editor pane: one more
+//     program that outlives the agent.  That route runs before the
+//     advanced_mouse_actions check below, so only this unbind stops it.
+mousebinds {
+    unbind "Ctrl Left" on="content"
+    unbind "Alt Left" "Alt Right"
+}
+
+// Pane grouping is reachable without those bindings as well: an Alt+drag that
+// starts where no press owner is recorded (on the bottom bar, say) adds every
+// pane it crosses to the group.  This switch is what the server checks before
+// any grouping, so it closes that route too.  It also drops hover highlighting
+// and Alt+wheel jumps between shell prompts, which mean nothing here.
+advanced_mouse_actions false

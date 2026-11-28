@@ -344,7 +344,7 @@ The [web UI](#web-ui) does not change this. It publishes no container port and a
 
 Built on **Fedora 45** and includes: Node.js, npm, Python 3.15 (default), Python 3.14, Python 3.13, Python 3.12 (each with devel and libs — ready for `python3.XX -m venv`), pytest, ruff, uv, yamllint, Git, curl, wget, ripgrep, fd-find, jq, yq, tree, Ansible, ansible-lint, ShellCheck, Vim, OpenShift client (`oc`), strace, poppler-utils (pdfinfo, pdftotext, pdfimages, etc.), mupdf (mutool — GUI binaries removed), pandoc, binutils (strings, objdump, nm, readelf, etc. — `as` and `ld` are removed for hardening), and standard GNU utilities (sed, gawk, grep, findutils, diffutils, patch, tar, gzip, unzip). Optionally it also includes [PrusaSlicer](#prusaslicer-optional).
 
-It also carries **zellij** (~44 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
+It also carries **zellij** (~76 MB), the terminal multiplexer behind [`--web`](#web-ui). It is fetched from the official GitHub release as a static musl binary, pinned by version and verified against a pinned SHA256 — the `no-web` variant, since zellij's own web server is not used. Nothing else in the image depends on it, and non-`--web` sessions never execute it.
 
 Two `uv` defaults are overridden in the image, both because `/home/agent` is a tmpfs while the project is a bind mount: `UV_LINK_MODE=copy`, since uv's cache and the `.venv` it populates sit on different filesystems and hardlinking would fall back to copying with a warning on every install; and `UV_PYTHON_PREFERENCE=system`, so the image's own Python interpreters stay the first choice over a managed one installed mid-session, which would live in the tmpfs and disappear at exit. Downloading an interpreter remains the fallback for a version that is not in the image.
 
@@ -496,6 +496,18 @@ The agent runs inside a detached [zellij](https://zellij.dev) session, which is 
 The session starts in zellij's **locked** mode, so every keystroke goes to the agent. This is not cosmetic: zellij's stock bindings claim `Ctrl+G`, `Ctrl+Q`, `Ctrl+P`, `Ctrl+N`, `Ctrl+S`, `Ctrl+O`, `Ctrl+T`, `Ctrl+H`, `Ctrl+B` and most `Alt` keys before the pane sees them, and the agents bind several of those themselves — Claude Code alone uses `Ctrl+G` (edit the prompt in `$EDITOR`), `Ctrl+O`, `Ctrl+T`, `Ctrl+B` and `Ctrl+R`.
 
 `Alt+g` is the single exception and the one door into zellij's own keybindings: press it for normal mode, and `Ctrl+o d` then detaches a terminal client (`Ctrl+g` locks again). A browser client just goes Back, or closes the tab. Zellij's `Quit` is unbound outright, in normal mode too and not merely unreachable while locked: it sits on `Ctrl+Q`, one fumbled key from the `Ctrl+O` of that chord, and a session quit that way takes the container with it — `--rm` then removes the tmpfs `/home/agent` and `/tmp` along with the agent's state.
+
+The mouse gets the same treatment, because zellij's default mouse bindings are bound in every mode, locked included. Anything that could end the session, start a second shell or take the keyboard from the agent is off:
+
+- The right-click menu. It offers *Close pane*, which ends the session as surely as `Quit` does.
+- `Ctrl`+drag, which would draw a floating pane.
+- Pane grouping, by `Alt`+click or `Alt`+drag. Its key-capturing selection closes the agent's pane on a plain `c`.
+- `Alt`+click on a file path in the output, which would open it in a floating editor pane.
+- Double-clicks on the bottom bar, which would rename the tab or open a new one.
+- The bar's session indicator, which would open the session manager.
+- The switch to zellij's scroll mode when the pane is scrolled back, which would hand the typing to zellij's scroll keys.
+
+A second shell matters because it outlives the agent: the session would never end, and the container would never stop on its own.
 
 The editor behind `Ctrl+G` is the image's Vim: `EDITOR` and `VISUAL` are set in the image, because zellij hands its panes container PID 1's environment and `/home/agent` is a tmpfs where no dotfile would survive.
 
