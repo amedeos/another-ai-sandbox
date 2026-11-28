@@ -42,6 +42,17 @@ WEB_PID=""
 TOKEN=""
 TOKEN_FILE=""
 STAGING=""
+# Set once the shared session wt1$$ has answered, so that
+# test_session_outlives_socket_wait can tell a session that never started (a
+# skip) from one that started and then disappeared (a failure).
+WT1_STARTED=no
+WT1_STARTED_AT=0
+# When the latest start_web_session's `podman run -d` returned.  The container's
+# supervisor is already running by then, so a deadline counted from here is a
+# lower bound on how long the supervisor has had.
+WEB_SESSION_STARTED_AT=0
+# Why the latest start_web_session failed, for the caller's failure message.
+START_ERROR=""
 
 # --- Prerequisites -----------------------------------------------------------
 
@@ -157,13 +168,20 @@ start_web_session() {
         pane=(/bin/bash -c 'while :; do sleep 5; done')
     fi
 
-    podman run -d --rm --name "sandbox-${name}" \
+    local out="${STAGING}/start-${name}.out" log="${STAGING}/start-${name}.log"
+    START_ERROR=""
+    # The tmpfs sizes are ai-sandbox's defaults, and must not be smaller.
+    # Podman copies the image's own /home/agent into the tmpfs when the
+    # container starts, and the claude image still carries its installer's
+    # ~400 MB output there.  Past the tmpfs size, `podman run` itself fails
+    # ("crun: write: No space left on device").
+    if ! podman run -d --rm --name "sandbox-${name}" \
         --userns=keep-id:uid=1000,gid=1000 \
         --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 \
         --read-only "--network=${network}" \
         -v "${WORK_DIR}:/workspace/work:Z" \
-        --tmpfs "/tmp:rw,size=256m" \
-        --mount "type=tmpfs,destination=/home/agent,tmpfs-size=256m,tmpfs-mode=0755,U=true" \
+        --tmpfs "/tmp:rw,size=1g" \
+        --mount "type=tmpfs,destination=/home/agent,tmpfs-size=1g,tmpfs-mode=0755,U=true" \
         -w /workspace/work \
         --label "ai-sandbox.web=1" \
         --label "ai-sandbox.session=${name}" \
@@ -174,20 +192,52 @@ start_web_session() {
         --label "ai-sandbox.network=${network}" \
         -e "AI_SANDBOX_WEB=1" -e "AI_SANDBOX_SESSION=${name}" \
         --entrypoint /usr/local/bin/ai-sandbox-supervise \
-        "$TEST_IMAGE" "${pane[@]}" >/dev/null 2>&1 || return 1
+        "$TEST_IMAGE" "${pane[@]}" >/dev/null 2>"$out"; then
+        START_ERROR="podman run: $(one_line "$out")"
+        return 1
+    fi
+    WEB_SESSION_STARTED_AT="$(date +%s)"
 
-    local i
+    # --rm deletes the container, and its log with it, as soon as the
+    # supervisor gives up.  Follow the log from the start, so that what the
+    # supervisor and zellij printed is still there for the failure message.
+    podman logs -f "sandbox-${name}" >"$log" 2>&1 &
+    local logs_pid=$!
+
+    local i rc=0
     for ((i = 0; i < 60; i++)); do
         if podman exec "sandbox-${name}" zellij --session "$name" \
-                action list-clients >/dev/null 2>&1; then
+                action list-clients >/dev/null 2>"$out"; then
+            kill "$logs_pid" 2>/dev/null
             # Let the supervisor's startup-tip sweep finish, so the agent pane
             # is focused before any client attaches.
             sleep 5
             return 0
         fi
+        rc=0
+        podman container exists "sandbox-${name}" || rc=$?
+        if [[ $rc -eq 1 ]]; then
+            break
+        fi
         sleep 0.5
     done
+
+    # A container that is gone has flushed its log, so the follower ends by
+    # itself; one still running needs stopping.
+    if [[ $rc -eq 1 ]]; then
+        wait "$logs_pid" 2>/dev/null
+        START_ERROR="the container exited; its log: $(one_line "$log")"
+    else
+        kill "$logs_pid" 2>/dev/null
+        wait "$logs_pid" 2>/dev/null
+        START_ERROR="list-clients never answered: $(one_line "$out"); log: $(one_line "$log")"
+    fi
     return 1
+}
+
+# The end of a file on one line, for a failure message.
+one_line() {
+    tr '\n\r' '  ' <"$1" 2>/dev/null | tail -c 300
 }
 
 teardown_session() {
@@ -305,14 +355,17 @@ test_optin_isolation() {
         return
     }
 
+    # Both counts are of the control container alone: real --web sessions may
+    # be running on this host as well, the developer's own among them.
     local all labelled listed
-    all="$(podman ps -q | wc -l)"
-    labelled="$(podman ps --filter label=ai-sandbox.web=1 -q | wc -l)"
+    all="$(podman ps -q --filter "name=webtest-plain-$$" | wc -l)"
+    labelled="$(podman ps -q --filter "name=webtest-plain-$$" \
+        --filter label=ai-sandbox.web=1 | wc -l)"
     listed="$(web GET /api/sessions || true)"
 
     podman rm -f "webtest-plain-$$" >/dev/null 2>&1 || true
 
-    if [[ "$all" -gt 0 && "$labelled" -eq 0 ]] &&
+    if [[ "$all" -eq 1 && "$labelled" -eq 0 ]] &&
        ! grep -q "webtest-plain" <<<"$listed"; then
         pass
     else
@@ -551,10 +604,12 @@ test_web_session_listed() {
     run_test "a --web session is listed with its parameters"
 
     if ! start_web_session "wt1$$"; then
-        fail "session did not start"
+        fail "session did not start: ${START_ERROR}"
         teardown_session "wt1$$"
         return
     fi
+    WT1_STARTED=yes
+    WT1_STARTED_AT="$WEB_SESSION_STARTED_AT"
 
     local body
     body="$(web GET /api/sessions || true)"
@@ -562,6 +617,55 @@ test_web_session_listed() {
         pass
     else
         fail "body=${body}"
+    fi
+}
+
+# ai-sandbox-supervise gives the session socket 10 s to appear, then exits and
+# --rm takes the container with it.  A socket it does not recognise therefore
+# looks healthy for those 10 s and then ends every session, which is what zellij
+# 0.46 did by naming sockets after a random id.  Without this test that failure
+# surfaces in whichever later test happens to be running at the 10 s mark.
+test_session_outlives_socket_wait() {
+    run_test "a --web session outlives the supervisor's 10 s socket wait"
+
+    local name="wt1$$"
+    if [[ "$WT1_STARTED" != yes ]]; then
+        skip "no session"
+        return
+    fi
+
+    # The supervisor's wait is 50 rounds of a 0.2 s sleep plus a `find`, so it
+    # runs past 10 s on a loaded host.  Measure from the container's start, with
+    # a wide margin, rather than add up sleeps that live in other functions.
+    local deadline=$((WT1_STARTED_AT + 20)) now
+    now="$(date +%s)"
+    if ((now < deadline)); then
+        sleep "$((deadline - now))"
+    fi
+
+    # `podman container exists` exits 1 for a missing container and 125 for a
+    # podman error, which must not read as the supervisor having given up.
+    local rc=0 running=""
+    podman container exists "sandbox-${name}" || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        fail "the container is gone: the supervisor never found the session socket"
+        return
+    elif [[ $rc -ne 0 ]]; then
+        fail "podman container exists failed (exit ${rc})"
+        return
+    fi
+    rc=0
+    running="$(podman container inspect --format '{{.State.Running}}' \
+        "sandbox-${name}" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        fail "podman container inspect failed (exit ${rc}): ${running}"
+    elif [[ "$running" != true ]]; then
+        fail "the container has exited: the supervisor never found the session socket"
+    elif ! podman exec "sandbox-${name}" zellij --session "$name" \
+            action list-clients >/dev/null 2>&1; then
+        fail "the container is running but its session does not answer"
+    else
+        pass
     fi
 }
 
@@ -678,7 +782,7 @@ test_ctrl_keys_reach_the_pane() {
     local name="wkb$$"
     if ! start_web_session "$name" none \
             /bin/bash -c 'cat -v >/tmp/keys.txt'; then
-        fail "session did not start"
+        fail "session did not start: ${START_ERROR}"
         teardown_session "$name"
         return
     fi
@@ -846,7 +950,7 @@ test_container_cannot_reach_dashboard() {
     # the dashboard does.
     local name="wt2$$"
     if ! start_web_session "$name" pasta; then
-        skip "session did not start (is pasta available?)"
+        skip "session did not start (is pasta available?): ${START_ERROR}"
         teardown_session "$name"
         return
     fi
@@ -901,6 +1005,62 @@ test_session_cleanup() {
     fi
 }
 
+# test_session_cleanup ends its session with `zellij kill-session`.  An agent
+# ends by exiting instead: its pane closes (--close-on-exit) and the session
+# with it, the server removes the socket, the supervisor sees that and exits,
+# and --rm removes the container.  This runs that path for real.
+test_container_removed_when_agent_exits() {
+    run_test "the container is removed when the agent exits on its own"
+
+    local name="wt4$$" started_at
+    # The pane outlives the supervisor's socket wait (about 10 s) by a wide
+    # margin. The container must still be running at the check below, or this
+    # test would pass for a supervisor that never found the socket, whose
+    # container also disappears, just earlier.
+    if ! start_web_session "$name" none /bin/bash -c 'sleep 25'; then
+        fail "session did not start: ${START_ERROR}"
+        teardown_session "$name"
+        return
+    fi
+    started_at="$WEB_SESSION_STARTED_AT"
+
+    local now rc=0 running=""
+    now="$(date +%s)"
+    if ((now < started_at + 15)); then
+        sleep "$((started_at + 15 - now))"
+    fi
+    running="$(podman container inspect --format '{{.State.Running}}' \
+        "sandbox-${name}" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 || "$running" != true ]]; then
+        teardown_session "$name"
+        fail "the container ended before the agent did (inspect exit ${rc}: ${running})"
+        return
+    fi
+
+    local i gone=no
+    for ((i = 0; i < 45; i++)); do
+        rc=0
+        podman container exists "sandbox-${name}" || rc=$?
+        if [[ $rc -eq 1 ]]; then
+            gone=yes
+            break
+        elif [[ $rc -ne 0 ]]; then
+            break
+        fi
+        sleep 1
+    done
+
+    teardown_session "$name"
+
+    if [[ "$gone" == yes ]]; then
+        pass
+    elif [[ $rc -ne 0 ]]; then
+        fail "podman container exists failed (exit ${rc})"
+    else
+        fail "container still present about 60 s after start, 35 s past the agent's exit"
+    fi
+}
+
 test_no_prompt_without_tty() {
     run_test "--web fails instead of hanging without a terminal"
 
@@ -930,6 +1090,7 @@ cleanup() {
     teardown_session "wt1$$"
     teardown_session "wt2$$"
     teardown_session "wt3$$"
+    teardown_session "wt4$$"
     teardown_session "wkb$$"
     podman rm -f "webtest-plain-$$" "sandbox-decoy$$" "sandbox-wtr$$" >/dev/null 2>&1 || true
     [[ -n "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
@@ -962,6 +1123,7 @@ test_dirs_completion
 test_dotted_directory_session_name
 test_web_session_labels
 test_web_session_listed
+test_session_outlives_socket_wait
 test_list_shows_web_session
 test_dual_attach
 test_ctrl_keys_reach_the_pane
@@ -971,6 +1133,7 @@ test_attach_refuses_non_web_container
 test_invalid_session_name_rejected
 test_container_cannot_reach_dashboard
 test_session_cleanup
+test_container_removed_when_agent_exits
 test_no_prompt_without_tty
 
 echo ""

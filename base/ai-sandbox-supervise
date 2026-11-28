@@ -40,9 +40,22 @@ trap 'zellij kill-session "$SESSION" >/dev/null 2>&1 || true; exit 0' TERM INT
 # identical session with no poll tears itself down within ~4 s.  A filesystem
 # check connects no client, and the socket is removed when the session ends,
 # which also covers the case of the zellij server dying unexpectedly.
+#
+# The socket cannot be looked up by the session name.  Since zellij 0.46 it is
+# named by a random id, recorded against the name in a sqlite index under
+# $HOME/.cache/zellij.  It carries the name only when that index is unavailable
+# or something of that name already sits in the socket or cache directory.
+# It is the only socket in its directory anyway: this script creates
+# the container's one session, in a /tmp that is a fresh tmpfs on every start.
+# `! -name '.*'` skips zellij's own dot-names, such as the `.<id>.lock` beside
+# each socket (a regular file today, so `-type s` already excludes it).  The
+# `.desk/` directory of the desktop app, and the `web_server_bus/` directory of
+# a web-enabled build, hold their sockets a level deeper.  The only other
+# process in the container is the agent, and the first round of this loop runs
+# as soon as `attach --create-background` has returned.
 SOCKET=""
 for _ in $(seq 1 50); do
-    SOCKET="$(find "${SOCKET_DIR}" -mindepth 2 -maxdepth 2 -type s -name "${SESSION}" 2>/dev/null | head -1 || true)"
+    SOCKET="$(find "${SOCKET_DIR}" -mindepth 2 -maxdepth 2 -type s ! -name '.*' 2>/dev/null | head -1 || true)"
     if [[ -n "$SOCKET" ]]; then
         break
     fi
@@ -57,7 +70,9 @@ fi
 # zellij opens a floating "About Zellij" startup-tip pane in every new session
 # and it takes focus the moment a client attaches, so without this the first
 # thing the user types goes to the tip plugin rather than to the agent
-# (verified).  There is no configuration option for it in 0.45.
+# (verified).  `show_startup_tips false` in /etc/zellij/config.kdl now turns
+# the tip off at the source.  This sweep predates that setting and stays until
+# a session started with it has been seen to open no tip.
 #
 # Measured: the tip pane is created asynchronously ~0.5 s AFTER the session
 # socket appears, so hiding once and stopping at the first "already hidden"
